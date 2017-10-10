@@ -1,4 +1,4 @@
-# Copyright 2013-2015 DataStax, Inc.
+# Copyright 2013-2017 DataStax, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,13 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import struct, logging, sys, traceback, time
+import struct, time, traceback, sys, logging
 
+from random import randint
 from cassandra import ConsistencyLevel, OperationTimedOut, ReadTimeout, WriteTimeout, Unavailable
 from cassandra.cluster import Cluster
 from cassandra.policies import TokenAwarePolicy, RoundRobinPolicy, DowngradingConsistencyRetryPolicy
 from cassandra.query import SimpleStatement
-from tests.integration import use_singledc, PROTOCOL_VERSION
+from tests.integration import use_singledc, PROTOCOL_VERSION, execute_until_pass
 
 from tests.integration.long.utils import (force_stop, create_schema, wait_for_down, wait_for_up,
                                           start, CoordinatorStats)
@@ -27,8 +28,6 @@ try:
     import unittest2 as unittest
 except ImportError:
     import unittest  # noqa
-
-log = logging.getLogger(__name__)
 
 ALL_CONSISTENCY_LEVELS = set([
     ConsistencyLevel.ANY, ConsistencyLevel.ONE, ConsistencyLevel.TWO,
@@ -40,6 +39,8 @@ MULTI_DC_CONSISTENCY_LEVELS = set([
     ConsistencyLevel.LOCAL_QUORUM, ConsistencyLevel.EACH_QUORUM])
 
 SINGLE_DC_CONSISTENCY_LEVELS = ALL_CONSISTENCY_LEVELS - MULTI_DC_CONSISTENCY_LEVELS
+
+log = logging.getLogger(__name__)
 
 
 def setup_module():
@@ -65,15 +66,7 @@ class ConsistencyTests(unittest.TestCase):
         for i in range(count):
             ss = SimpleStatement('INSERT INTO cf(k, i) VALUES (0, 0)',
                                  consistency_level=consistency_level)
-            while True:
-                try:
-                    session.execute(ss)
-                    break
-                except (OperationTimedOut, WriteTimeout):
-                    ex_type, ex, tb = sys.exc_info()
-                    log.warn("{0}: {1} Backtrace: {2}".format(ex_type.__name__, ex, traceback.extract_tb(tb)))
-                    del tb
-                    time.sleep(1)
+            execute_until_pass(session, ss)
 
     def _query(self, session, keyspace, count, consistency_level=ConsistencyLevel.ONE):
         routing_key = struct.pack('>i', 0)
@@ -81,7 +74,10 @@ class ConsistencyTests(unittest.TestCase):
             ss = SimpleStatement('SELECT * FROM cf WHERE k = 0',
                                  consistency_level=consistency_level,
                                  routing_key=routing_key)
+            tries = 0
             while True:
+                if tries > 100:
+                    raise RuntimeError("Failed to execute query after 100 attempts: {0}".format(ss))
                 try:
                     self.coordinator_stats.add_coordinator(session.execute_async(ss))
                     break
@@ -89,6 +85,7 @@ class ConsistencyTests(unittest.TestCase):
                     ex_type, ex, tb = sys.exc_info()
                     log.warn("{0}: {1} Backtrace: {2}".format(ex_type.__name__, ex, traceback.extract_tb(tb)))
                     del tb
+                    tries += 1
                     time.sleep(1)
 
     def _assert_writes_succeed(self, session, keyspace, consistency_levels):
@@ -134,11 +131,11 @@ class ConsistencyTests(unittest.TestCase):
         cluster = Cluster(
             load_balancing_policy=TokenAwarePolicy(RoundRobinPolicy()),
             protocol_version=PROTOCOL_VERSION)
-        session = cluster.connect()
-        wait_for_up(cluster, 1, wait=False)
+        session = cluster.connect(wait_for_all_pools=True)
+        wait_for_up(cluster, 1)
         wait_for_up(cluster, 2)
 
-        create_schema(session, keyspace, replication_factor=rf)
+        create_schema(cluster, session, keyspace, replication_factor=rf)
         self._insert(session, keyspace, count=1)
         self._query(session, keyspace, count=1)
         self.coordinator_stats.assert_query_count_equals(self, 1, 0)
@@ -186,11 +183,11 @@ class ConsistencyTests(unittest.TestCase):
         cluster = Cluster(
             load_balancing_policy=TokenAwarePolicy(RoundRobinPolicy()),
             protocol_version=PROTOCOL_VERSION)
-        session = cluster.connect()
-        wait_for_up(cluster, 1, wait=False)
+        session = cluster.connect(wait_for_all_pools=True)
+        wait_for_up(cluster, 1)
         wait_for_up(cluster, 2)
 
-        create_schema(session, keyspace, replication_factor=3)
+        create_schema(cluster, session, keyspace, replication_factor=3)
         self._insert(session, keyspace, count=1)
         self._query(session, keyspace, count=1)
         self.coordinator_stats.assert_query_count_equals(self, 1, 0)
@@ -211,9 +208,9 @@ class ConsistencyTests(unittest.TestCase):
             load_balancing_policy=TokenAwarePolicy(RoundRobinPolicy()),
             default_retry_policy=DowngradingConsistencyRetryPolicy(),
             protocol_version=PROTOCOL_VERSION)
-        session = cluster.connect()
+        session = cluster.connect(wait_for_all_pools=True)
 
-        create_schema(session, keyspace, replication_factor=rf)
+        create_schema(cluster, session, keyspace, replication_factor=rf)
         self._insert(session, keyspace, 1)
         self._query(session, keyspace, 1)
         self.coordinator_stats.assert_query_count_equals(self, 1, 0)
@@ -266,9 +263,9 @@ class ConsistencyTests(unittest.TestCase):
         self.rfthree_downgradingcl(cluster, keyspace, False)
 
     def rfthree_downgradingcl(self, cluster, keyspace, roundrobin):
-        session = cluster.connect()
+        session = cluster.connect(wait_for_all_pools=True)
 
-        create_schema(session, keyspace, replication_factor=2)
+        create_schema(cluster, session, keyspace, replication_factor=2)
         self._insert(session, keyspace, count=12)
         self._query(session, keyspace, count=12)
 
@@ -310,3 +307,61 @@ class ConsistencyTests(unittest.TestCase):
     #       instead we should create these elsewhere
     # def test_rfthree_downgradingcl_twodcs(self):
     # def test_rfthree_downgradingcl_twodcs_dcaware(self):
+
+
+class ConnectivityTest(unittest.TestCase):
+
+    def get_node_not_x(self, node_to_stop):
+        nodes = [1, 2, 3]
+        for num in nodes:
+            if num is not node_to_stop:
+                return num
+
+    def test_pool_with_host_down(self):
+        """
+        Test to ensure that cluster.connect() doesn't return prior to pools being initialized.
+
+        This test will figure out which host our pool logic will connect to first. It then shuts that server down.
+        Previously the cluster.connect() would return prior to the pools being initialized, and the first queries would
+        return a no host exception
+
+        @since 3.7.0
+        @jira_ticket PYTHON-617
+        @expected_result query should complete successfully
+
+        @test_category connection
+        """
+
+        # find the first node, we will try create connections to, shut it down.
+
+        # We will be shuting down a random house, so we need a complete contact list
+        all_contact_points = ["127.0.0.1", "127.0.0.2", "127.0.0.3"]
+
+        # Connect up and find out which host will bet queries routed to to first
+        cluster = Cluster(protocol_version=PROTOCOL_VERSION)
+        cluster.connect(wait_for_all_pools=True)
+        hosts = cluster.metadata.all_hosts()
+        address = hosts[0].address
+        node_to_stop = int(address.split('.')[-1:][0])
+        cluster.shutdown()
+
+        # We now register a cluster that has it's Control Connection NOT on the node that we are shutting down.
+        # We do this so we don't miss the event
+        contact_point = '127.0.0.{0}'.format(self.get_node_not_x(node_to_stop))
+        cluster = Cluster(contact_points=[contact_point], protocol_version=PROTOCOL_VERSION)
+        cluster.connect(wait_for_all_pools=True)
+        try:
+            force_stop(node_to_stop)
+            wait_for_down(cluster, node_to_stop)
+            # Attempt a query against that node. It should complete
+            cluster2 = Cluster(contact_points=all_contact_points, protocol_version=PROTOCOL_VERSION)
+            session2 = cluster2.connect()
+            session2.execute("SELECT * FROM system.local")
+        finally:
+            cluster2.shutdown()
+            start(node_to_stop)
+            wait_for_up(cluster, node_to_stop)
+            cluster.shutdown()
+
+
+

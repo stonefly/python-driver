@@ -11,9 +11,6 @@
 
 .. autofunction:: ordered_dict_factory
 
-.. autoclass:: Statement
-   :members:
-
 .. autoclass:: SimpleStatement
    :members:
 
@@ -22,6 +19,12 @@
 
 .. autoclass:: BoundStatement
    :members:
+
+.. autoclass:: Statement ()
+   :members:
+
+.. autodata:: UNSET_VALUE
+   :annotation:
 
 .. autoclass:: BatchStatement (batch_type=BatchType.LOGGED, retry_policy=None, consistency_level=None)
    :members:

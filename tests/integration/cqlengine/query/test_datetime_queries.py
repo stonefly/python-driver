@@ -1,4 +1,4 @@
-# Copyright 2015 DataStax, Inc.
+# Copyright 2013-2017 DataStax, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,20 +14,23 @@
 
 from datetime import datetime, timedelta
 from uuid import uuid4
+from cassandra.cqlengine.functions import get_total_seconds
 
 from tests.integration.cqlengine.base import BaseCassEngTestCase
 
 from cassandra.cqlengine.management import sync_table
 from cassandra.cqlengine.management import drop_table
-from cassandra.cqlengine.models import Model, ModelException
+from cassandra.cqlengine.models import Model
 from cassandra.cqlengine import columns
-from cassandra.cqlengine import query
+from tests.integration.cqlengine import execute_count
+
 
 class DateTimeQueryTestModel(Model):
 
-    user        = columns.Integer(primary_key=True)
-    day         = columns.DateTime(primary_key=True)
-    data        = columns.Text()
+    user = columns.Integer(primary_key=True)
+    day = columns.DateTime(primary_key=True)
+    data = columns.Text()
+
 
 class TestDateTimeQueries(BaseCassEngTestCase):
 
@@ -45,12 +48,12 @@ class TestDateTimeQueries(BaseCassEngTestCase):
                     data=str(uuid4())
                 )
 
-
     @classmethod
     def tearDownClass(cls):
         super(TestDateTimeQueries, cls).tearDownClass()
         drop_table(DateTimeQueryTestModel)
 
+    @execute_count(1)
     def test_range_query(self):
         """ Tests that loading from a range of dates works properly """
         start = datetime(*self.base_date.timetuple()[:3])
@@ -59,6 +62,7 @@ class TestDateTimeQueries(BaseCassEngTestCase):
         results = DateTimeQueryTestModel.filter(user=0, day__gte=start, day__lt=end)
         assert len(results) == 3
 
+    @execute_count(3)
     def test_datetime_precision(self):
         """ Tests that millisecond resolution is preserved when saving datetime objects """
         now = datetime.now()
@@ -66,6 +70,6 @@ class TestDateTimeQueries(BaseCassEngTestCase):
         obj = DateTimeQueryTestModel.create(user=pk, day=now, data='energy cheese')
         load = DateTimeQueryTestModel.get(user=pk)
 
-        assert abs(now - load.day).total_seconds() < 0.001
+        self.assertAlmostEqual(get_total_seconds(now - load.day), 0, 2)
         obj.delete()
 

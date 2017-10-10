@@ -1,4 +1,4 @@
-# Copyright 2015 DataStax, Inc.
+# Copyright 2013-2017 DataStax, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,10 +14,6 @@
 
 import six
 
-
-# compaction
-SizeTieredCompactionStrategy = "SizeTieredCompactionStrategy"
-LeveledCompactionStrategy = "LeveledCompactionStrategy"
 
 # Caching constants.
 CACHING_ALL = "ALL"

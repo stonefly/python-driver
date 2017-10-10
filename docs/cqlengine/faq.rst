@@ -2,15 +2,15 @@
 Frequently Asked Questions
 ==========================
 
-Q: Why don't updates work correctly on models instantiated as Model(field=value, field2=value2)?
+Why don't updates work correctly on models instantiated as Model(field=value, field2=value2)?
 ------------------------------------------------------------------------------------------------
 
-A: The recommended way to create new rows is with the models .create method. The values passed into a model's init method are interpreted by the model as the values as they were read from a row. This allows the model to "know" which rows have changed since the row was read out of cassandra, and create suitable update statements.
+The recommended way to create new rows is with the models .create method. The values passed into a model's init method are interpreted by the model as the values as they were read from a row. This allows the model to "know" which rows have changed since the row was read out of cassandra, and create suitable update statements.
 
-Q: How to preserve ordering in batch query?
+How to preserve ordering in batch query?
 -------------------------------------------
 
-A: Statement Ordering is not supported by CQL3 batches. Therefore,
+Statement Ordering is not supported by CQL3 batches. Therefore,
 once cassandra needs resolving conflict(Updating the same column in one batch),
 The algorithm below would be used.
 
@@ -48,3 +48,20 @@ resolve to the statement with the lastest timestamp.
     assert MyModel.objects(id=1).first().count == 3
     assert MyModel.objects(id=1).first().text  == '111'
 
+How can I delete individual values from a row?
+-------------------------------------------------
+
+When inserting with CQLEngine, ``None`` is equivalent to CQL ``NULL`` or to
+issuing a ``DELETE`` on that column. For example:
+
+.. code-block:: python
+
+    class MyModel(Model):
+        id    = columns.Integer(primary_key=True)
+        text  = columns.Text()
+
+    m = MyModel.create(id=1, text='We can delete this with None')
+    assert MyModel.objects(id=1).first().text is not None
+
+    m.update(text=None)
+    assert MyModel.objects(id=1).first().text is None

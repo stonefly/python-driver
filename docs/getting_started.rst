@@ -179,7 +179,7 @@ Named place-holders use the ``%(name)s`` form:
         """
         INSERT INTO users (name, credits, user_id, username)
         VALUES (%(name)s, %(credits)s, %(user_id)s, %(name)s)
-        """
+        """,
         {'name': "John O'Reilly", 'credits': 42, 'user_id': uuid.uuid1()}
     )
 
@@ -212,6 +212,8 @@ following way:
     | | ``int``          | | ``int``               |
     | | ``long``         | | ``bigint``            |
     |                    | | ``varint``            |
+    |                    | | ``smallint``          |
+    |                    | | ``tinyint``           |
     |                    | | ``counter``           |
     +--------------------+-------------------------+
     | ``decimal.Decimal``| ``decimal``             |
@@ -325,8 +327,9 @@ The consistency level used for a query determines how many of the
 replicas of the data you are interacting with need to respond for
 the query to be considered a success.
 
-By default, :attr:`.ConsistencyLevel.ONE` will be used for all queries. To
-specify a different consistency level, you will need to wrap your queries
+By default, :attr:`.ConsistencyLevel.LOCAL_ONE` will be used for all queries.
+You can specify a different default for the session on :attr:`.Session.default_consistency_level`.
+To specify a different consistency level per request, wrap queries
 in a :class:`~.SimpleStatement`:
 
 .. code-block:: python
@@ -394,6 +397,6 @@ level on that:
 .. code-block:: python
 
     # override the QUORUM default
-    user3_lookup = user_lookup_stmt.bind([user_id3]
+    user3_lookup = user_lookup_stmt.bind([user_id3])
     user3_lookup.consistency_level = ConsistencyLevel.ALL
     user3 = session.execute(user3_lookup)

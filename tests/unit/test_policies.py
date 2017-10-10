@@ -1,4 +1,4 @@
-# Copyright 2013-2015 DataStax, Inc.
+# Copyright 2013-2017 DataStax, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,9 +18,10 @@ except ImportError:
     import unittest  # noqa
 
 from itertools import islice, cycle
-from mock import Mock
+from mock import Mock, patch, call
 from random import randint
 import six
+from six.moves._thread import LockType
 import sys
 import struct
 from threading import Thread
@@ -28,12 +29,13 @@ from threading import Thread
 from cassandra import ConsistencyLevel
 from cassandra.cluster import Cluster
 from cassandra.metadata import Metadata
-from cassandra.policies import (RoundRobinPolicy, DCAwareRoundRobinPolicy,
+from cassandra.policies import (RoundRobinPolicy, WhiteListRoundRobinPolicy, DCAwareRoundRobinPolicy,
                                 TokenAwarePolicy, SimpleConvictionPolicy,
                                 HostDistance, ExponentialReconnectionPolicy,
                                 RetryPolicy, WriteType,
                                 DowngradingConsistencyRetryPolicy, ConstantReconnectionPolicy,
-                                LoadBalancingPolicy, ConvictionPolicy, ReconnectionPolicy, FallthroughRetryPolicy)
+                                LoadBalancingPolicy, ConvictionPolicy, ReconnectionPolicy, FallthroughRetryPolicy,
+                                IdentityTranslator, EC2MultiRegionTranslator, HostFilterPolicy)
 from cassandra.pool import Host
 from cassandra.query import Statement
 
@@ -104,11 +106,13 @@ class RoundRobinPolicyTest(unittest.TestCase):
         def check_query_plan():
             for i in range(100):
                 qplan = list(policy.make_query_plan())
-                self.assertEqual(sorted(qplan), hosts)
+                self.assertEqual(sorted(qplan), list(hosts))
 
         threads = [Thread(target=check_query_plan) for i in range(4)]
-        map(lambda t: t.start(), threads)
-        map(lambda t: t.join(), threads)
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
 
     def test_thread_safety_during_modification(self):
         hosts = range(100)
@@ -418,7 +422,6 @@ class DCAwareRoundRobinPolicyTest(unittest.TestCase):
         policy.on_up(hosts[2])
         policy.on_up(hosts[3])
 
-
         another_host = Host(5, SimpleConvictionPolicy)
         another_host.set_location_info("dc3", "rack1")
         new_host.set_location_info("dc3", "rack1")
@@ -483,7 +486,7 @@ class DCAwareRoundRobinPolicyTest(unittest.TestCase):
         host_none = Host(1, SimpleConvictionPolicy)
 
         # contact point is '1'
-        cluster = Mock(contact_points=[1])
+        cluster = Mock(contact_points_resolved=[1])
 
         # contact DC first
         policy = DCAwareRoundRobinPolicy()
@@ -730,6 +733,73 @@ class TokenAwarePolicyTest(unittest.TestCase):
         self.assertEqual(replicas + hosts[:2], qplan)
         cluster.metadata.get_replicas.assert_called_with(statement_keyspace, routing_key)
 
+    def test_shuffles_if_given_keyspace_and_routing_key(self):
+        """
+        Test to validate the hosts are shuffled when `shuffle_replicas` is truthy
+        @since 3.8
+        @jira_ticket PYTHON-676
+        @expected_result shuffle should be called, because the keyspace and the
+        routing key are set
+
+        @test_category policy
+        """
+        self._assert_shuffle(keyspace='keyspace', routing_key='routing_key')
+
+    def test_no_shuffle_if_given_no_keyspace(self):
+        """
+        Test to validate the hosts are not shuffled when no keyspace is provided
+        @since 3.8
+        @jira_ticket PYTHON-676
+        @expected_result shuffle should be called, because keyspace is None
+
+        @test_category policy
+        """
+        self._assert_shuffle(keyspace=None, routing_key='routing_key')
+
+    def test_no_shuffle_if_given_no_routing_key(self):
+        """
+        Test to validate the hosts are not shuffled when no routing_key is provided
+        @since 3.8
+        @jira_ticket PYTHON-676
+        @expected_result shuffle should be called, because routing_key is None
+
+        @test_category policy
+        """
+        self._assert_shuffle(keyspace='keyspace', routing_key=None)
+
+    @patch('cassandra.policies.shuffle')
+    def _assert_shuffle(self, patched_shuffle, keyspace, routing_key):
+        hosts = [Host(str(i), SimpleConvictionPolicy) for i in range(4)]
+        for host in hosts:
+            host.set_up()
+
+        cluster = Mock(spec=Cluster)
+        cluster.metadata = Mock(spec=Metadata)
+        replicas = hosts[2:]
+        cluster.metadata.get_replicas.return_value = replicas
+
+        child_policy = Mock()
+        child_policy.make_query_plan.return_value = hosts
+        child_policy.distance.return_value = HostDistance.LOCAL
+
+        policy = TokenAwarePolicy(child_policy, shuffle_replicas=True)
+        policy.populate(cluster, hosts)
+
+        cluster.metadata.get_replicas.reset_mock()
+        child_policy.make_query_plan.reset_mock()
+        query = Statement(routing_key=routing_key)
+        qplan = list(policy.make_query_plan(keyspace, query))
+        if keyspace is None or routing_key is None:
+            self.assertEqual(hosts, qplan)
+            self.assertEqual(cluster.metadata.get_replicas.call_count, 0)
+            child_policy.make_query_plan.assert_called_once_with(keyspace, query)
+            self.assertEqual(patched_shuffle.call_count, 0)
+        else:
+            self.assertEqual(set(replicas), set(qplan[:2]))
+            self.assertEqual(hosts[:2], qplan[2:])
+            child_policy.make_query_plan.assert_called_once_with(keyspace, query)
+            self.assertEqual(patched_shuffle.call_count, 1)
+
 
 class ConvictionPolicyTest(unittest.TestCase):
     def test_not_implemented(self):
@@ -799,6 +869,14 @@ class ConstantReconnectionPolicyTest(unittest.TestCase):
         except ValueError:
             pass
 
+    def test_schedule_infinite_attempts(self):
+        delay = 2
+        max_attempts = None
+        crp = ConstantReconnectionPolicy(delay=delay, max_attempts=max_attempts)
+        # this is infinite. we'll just verify one more than default
+        for _, d in zip(range(65), crp.new_schedule()):
+            self.assertEqual(d, delay)
+
 
 class ExponentialReconnectionPolicyTest(unittest.TestCase):
 
@@ -806,18 +884,66 @@ class ExponentialReconnectionPolicyTest(unittest.TestCase):
         self.assertRaises(ValueError, ExponentialReconnectionPolicy, -1, 0)
         self.assertRaises(ValueError, ExponentialReconnectionPolicy, 0, -1)
         self.assertRaises(ValueError, ExponentialReconnectionPolicy, 9000, 1)
+        self.assertRaises(ValueError, ExponentialReconnectionPolicy, 1, 2, -1)
 
-    def test_schedule(self):
-        policy = ExponentialReconnectionPolicy(base_delay=2, max_delay=100)
+    def test_schedule_no_max(self):
+        base_delay = 2.0
+        max_delay = 100.0
+        test_iter = 10000
+        policy = ExponentialReconnectionPolicy(base_delay=base_delay, max_delay=max_delay, max_attempts=None)
+        sched_slice = list(islice(policy.new_schedule(), 0, test_iter))
+        self.assertEqual(sched_slice[0], base_delay)
+        self.assertEqual(sched_slice[-1], max_delay)
+        self.assertEqual(len(sched_slice), test_iter)
+
+    def test_schedule_with_max(self):
+        base_delay = 2.0
+        max_delay = 100.0
+        max_attempts = 64
+        policy = ExponentialReconnectionPolicy(base_delay=base_delay, max_delay=max_delay, max_attempts=max_attempts)
         schedule = list(policy.new_schedule())
-        self.assertEqual(len(schedule), 64)
+        self.assertEqual(len(schedule), max_attempts)
         for i, delay in enumerate(schedule):
             if i == 0:
-                self.assertEqual(delay, 2)
+                self.assertEqual(delay, base_delay)
             elif i < 6:
                 self.assertEqual(delay, schedule[i - 1] * 2)
             else:
-                self.assertEqual(delay, 100)
+                self.assertEqual(delay, max_delay)
+
+    def test_schedule_exactly_one_attempt(self):
+        base_delay = 2.0
+        max_delay = 100.0
+        max_attempts = 1
+        policy = ExponentialReconnectionPolicy(
+            base_delay=base_delay, max_delay=max_delay, max_attempts=max_attempts
+        )
+        self.assertEqual(len(list(policy.new_schedule())), 1)
+
+    def test_schedule_overflow(self):
+        """
+        Test to verify an OverflowError is handled correctly
+        in the ExponentialReconnectionPolicy
+        @since 3.10
+        @jira_ticket PYTHON-707
+        @expected_result all numbers should be less than sys.float_info.max
+        since that's the biggest max we can possibly have as that argument must be a float.
+        Note that is possible for a float to be inf.
+
+        @test_category policy
+        """
+
+        # This should lead to overflow
+        # Note that this may not happen in the fist iterations
+        # as sys.float_info.max * 2 = inf
+        base_delay = sys.float_info.max - 1
+        max_delay = sys.float_info.max
+        max_attempts = 2**12
+        policy = ExponentialReconnectionPolicy(base_delay=base_delay, max_delay=max_delay, max_attempts=max_attempts)
+        schedule = list(policy.new_schedule())
+        for number in schedule:
+            self.assertLessEqual(number, sys.float_info.max)
+
 
 ONE = ConsistencyLevel.ONE
 
@@ -894,14 +1020,14 @@ class RetryPolicyTest(unittest.TestCase):
         retry, consistency = policy.on_unavailable(
             query=None, consistency=ONE,
             required_replicas=1, alive_replicas=2, retry_num=0)
-        self.assertEqual(retry, RetryPolicy.RETHROW)
-        self.assertEqual(consistency, None)
+        self.assertEqual(retry, RetryPolicy.RETRY_NEXT_HOST)
+        self.assertEqual(consistency, ONE)
 
         retry, consistency = policy.on_unavailable(
             query=None, consistency=ONE,
             required_replicas=10000, alive_replicas=1, retry_num=0)
-        self.assertEqual(retry, RetryPolicy.RETHROW)
-        self.assertEqual(consistency, None)
+        self.assertEqual(retry, RetryPolicy.RETRY_NEXT_HOST)
+        self.assertEqual(consistency, ONE)
 
 
 class FallthroughRetryPolicyTest(unittest.TestCase):
@@ -1044,12 +1170,17 @@ class DowngradingConsistencyRetryPolicyTest(unittest.TestCase):
         self.assertEqual(retry, RetryPolicy.RETHROW)
         self.assertEqual(consistency, None)
 
-        # ignore failures on these types of writes
         for write_type in (WriteType.SIMPLE, WriteType.BATCH, WriteType.COUNTER):
+            # ignore failures if at least one response (replica persisted)
             retry, consistency = policy.on_write_timeout(
                 query=None, consistency=ONE, write_type=write_type,
                 required_responses=1, received_responses=2, retry_num=0)
             self.assertEqual(retry, RetryPolicy.IGNORE)
+            # retrhow if we can't be sure we have a replica
+            retry, consistency = policy.on_write_timeout(
+                query=None, consistency=ONE, write_type=write_type,
+                required_responses=1, received_responses=0, retry_num=0)
+            self.assertEqual(retry, RetryPolicy.RETHROW)
 
         # downgrade consistency level on unlogged batch writes
         retry, consistency = policy.on_write_timeout(
@@ -1086,3 +1217,260 @@ class DowngradingConsistencyRetryPolicyTest(unittest.TestCase):
             query=None, consistency=ONE, required_replicas=3, alive_replicas=1, retry_num=0)
         self.assertEqual(retry, RetryPolicy.RETRY)
         self.assertEqual(consistency, ConsistencyLevel.ONE)
+
+
+class WhiteListRoundRobinPolicyTest(unittest.TestCase):
+
+    def test_hosts_with_hostname(self):
+        hosts = ['localhost']
+        policy = WhiteListRoundRobinPolicy(hosts)
+        host = Host("127.0.0.1", SimpleConvictionPolicy)
+        policy.populate(None, [host])
+
+        qplan = list(policy.make_query_plan())
+        self.assertEqual(sorted(qplan), [host])
+
+        self.assertEqual(policy.distance(host), HostDistance.LOCAL)
+
+
+class AddressTranslatorTest(unittest.TestCase):
+
+    def test_identity_translator(self):
+        IdentityTranslator()
+
+    @patch('socket.getfqdn', return_value='localhost')
+    def test_ec2_multi_region_translator(self, *_):
+        ec2t = EC2MultiRegionTranslator()
+        addr = '127.0.0.1'
+        translated = ec2t.translate(addr)
+        self.assertIsNot(translated, addr)  # verifies that the resolver path is followed
+        self.assertEqual(translated, addr)  # and that it resolves to the same address
+
+
+class HostFilterPolicyInitTest(unittest.TestCase):
+
+    def setUp(self):
+        self.child_policy, self.predicate = (Mock(name='child_policy'),
+                                             Mock(name='predicate'))
+
+    def _check_init(self, hfp):
+        self.assertIs(hfp._child_policy, self.child_policy)
+        self.assertIsInstance(hfp._hosts_lock, LockType)
+
+        # we can't use a simple assertIs because we wrap the function
+        arg0, arg1 = Mock(name='arg0'), Mock(name='arg1')
+        hfp.predicate(arg0)
+        hfp.predicate(arg1)
+        self.predicate.assert_has_calls([call(arg0), call(arg1)])
+
+    def test_init_arg_order(self):
+        self._check_init(HostFilterPolicy(self.child_policy, self.predicate))
+
+    def test_init_kwargs(self):
+        self._check_init(HostFilterPolicy(
+            predicate=self.predicate, child_policy=self.child_policy
+        ))
+
+    def test_immutable_predicate(self):
+        expected_message_regex = "can't set attribute"
+        hfp = HostFilterPolicy(child_policy=Mock(name='child_policy'),
+                               predicate=Mock(name='predicate'))
+        with self.assertRaisesRegexp(AttributeError, expected_message_regex):
+            hfp.predicate = object()
+
+
+class HostFilterPolicyDeferralTest(unittest.TestCase):
+
+    def setUp(self):
+        self.passthrough_hfp = HostFilterPolicy(
+            child_policy=Mock(name='child_policy'),
+            predicate=Mock(name='passthrough_predicate',
+                           return_value=True)
+        )
+        self.filterall_hfp = HostFilterPolicy(
+            child_policy=Mock(name='child_policy'),
+            predicate=Mock(name='filterall_predicate',
+                           return_value=False)
+        )
+
+    def _check_host_triggered_method(self, policy, name):
+        arg, kwarg = Mock(name='arg'), Mock(name='kwarg')
+        method, child_policy_method = (getattr(policy, name),
+                                       getattr(policy._child_policy, name))
+
+        result = method(arg, kw=kwarg)
+
+        # method calls the child policy's method...
+        child_policy_method.assert_called_once_with(arg, kw=kwarg)
+        # and returns its return value
+        self.assertIs(result, child_policy_method.return_value)
+
+    def test_defer_on_up_to_child_policy(self):
+        self._check_host_triggered_method(self.passthrough_hfp, 'on_up')
+
+    def test_defer_on_down_to_child_policy(self):
+        self._check_host_triggered_method(self.passthrough_hfp, 'on_down')
+
+    def test_defer_on_add_to_child_policy(self):
+        self._check_host_triggered_method(self.passthrough_hfp, 'on_add')
+
+    def test_defer_on_remove_to_child_policy(self):
+        self._check_host_triggered_method(self.passthrough_hfp, 'on_remove')
+
+    def test_filtered_host_on_up_doesnt_call_child_policy(self):
+        self._check_host_triggered_method(self.filterall_hfp, 'on_up')
+
+    def test_filtered_host_on_down_doesnt_call_child_policy(self):
+        self._check_host_triggered_method(self.filterall_hfp, 'on_down')
+
+    def test_filtered_host_on_add_doesnt_call_child_policy(self):
+        self._check_host_triggered_method(self.filterall_hfp, 'on_add')
+
+    def test_filtered_host_on_remove_doesnt_call_child_policy(self):
+        self._check_host_triggered_method(self.filterall_hfp, 'on_remove')
+
+    def _check_check_supported_deferral(self, policy):
+        policy.check_supported()
+        policy._child_policy.check_supported.assert_called_once()
+
+    def test_check_supported_defers_to_child(self):
+        self._check_check_supported_deferral(self.passthrough_hfp)
+
+    def test_check_supported_defers_to_child_when_predicate_filtered(self):
+        self._check_check_supported_deferral(self.filterall_hfp)
+
+
+class HostFilterPolicyDistanceTest(unittest.TestCase):
+
+    def setUp(self):
+        self.hfp = HostFilterPolicy(
+            child_policy=Mock(name='child_policy', distance=Mock(name='distance')),
+            predicate=lambda host: host.address == 'acceptme'
+        )
+        self.ignored_host = Host(inet_address='ignoreme', conviction_policy_factory=Mock())
+        self.accepted_host = Host(inet_address='acceptme', conviction_policy_factory=Mock())
+
+    def test_ignored_with_filter(self):
+        self.assertEqual(self.hfp.distance(self.ignored_host),
+                         HostDistance.IGNORED)
+        self.assertNotEqual(self.hfp.distance(self.accepted_host),
+                            HostDistance.IGNORED)
+
+    def test_accepted_filter_defers_to_child_policy(self):
+        self.hfp._child_policy.distance.side_effect = distances = Mock(), Mock()
+
+        # getting the distance for an ignored host shouldn't affect subsequent results
+        self.hfp.distance(self.ignored_host)
+        # first call of _child_policy with count() side effect
+        self.assertEqual(self.hfp.distance(self.accepted_host), distances[0])
+        # second call of _child_policy with count() side effect
+        self.assertEqual(self.hfp.distance(self.accepted_host), distances[1])
+
+
+class HostFilterPolicyPopulateTest(unittest.TestCase):
+
+    def test_populate_deferred_to_child(self):
+        hfp = HostFilterPolicy(
+            child_policy=Mock(name='child_policy'),
+            predicate=lambda host: True
+        )
+        mock_cluster, hosts = (Mock(name='cluster'),
+                               ['host1', 'host2', 'host3'])
+        hfp.populate(mock_cluster, hosts)
+        hfp._child_policy.populate.assert_called_once_with(
+            cluster=mock_cluster,
+            hosts=hosts
+        )
+
+    def test_child_is_populated_with_filtered_hosts(self):
+        hfp = HostFilterPolicy(
+            child_policy=Mock(name='child_policy'),
+            predicate=lambda host: False
+        )
+        mock_cluster, hosts = (Mock(name='cluster'),
+                               ['acceptme0', 'acceptme1'])
+        hfp.populate(mock_cluster, hosts)
+        hfp._child_policy.populate.assert_called_once()
+        self.assertEqual(
+            hfp._child_policy.populate.call_args[1]['hosts'],
+            ['acceptme0', 'acceptme1']
+        )
+
+
+class HostFilterPolicyQueryPlanTest(unittest.TestCase):
+
+    def test_query_plan_deferred_to_child(self):
+        child_policy = Mock(
+            name='child_policy',
+            make_query_plan=Mock(
+                return_value=[object(), object(), object()]
+            )
+        )
+        hfp = HostFilterPolicy(
+            child_policy=child_policy,
+            predicate=lambda host: True
+        )
+        working_keyspace, query = (Mock(name='working_keyspace'),
+                                   Mock(name='query'))
+        qp = list(hfp.make_query_plan(working_keyspace=working_keyspace,
+                                      query=query))
+        hfp._child_policy.make_query_plan.assert_called_once_with(
+            working_keyspace=working_keyspace,
+            query=query
+        )
+        self.assertEqual(qp, hfp._child_policy.make_query_plan.return_value)
+
+    def test_wrap_token_aware(self):
+        cluster = Mock(spec=Cluster)
+        hosts = [Host("127.0.0.{}".format(i), SimpleConvictionPolicy) for i in range(1, 6)]
+        for host in hosts:
+            host.set_up()
+
+        def get_replicas(keyspace, packed_key):
+            return hosts[:2]
+
+        cluster.metadata.get_replicas.side_effect = get_replicas
+
+        child_policy = TokenAwarePolicy(RoundRobinPolicy())
+
+        hfp = HostFilterPolicy(
+            child_policy=child_policy,
+            predicate=lambda host: host.address != "127.0.0.1" and host.address != "127.0.0.4"
+        )
+        hfp.populate(cluster, hosts)
+
+        # We don't allow randomness for ordering the replicas in RoundRobin
+        hfp._child_policy._child_policy._position = 0
+
+
+        mocked_query = Mock()
+        query_plan = hfp.make_query_plan("keyspace", mocked_query)
+        # First the not filtered replica, and then the rest of the allowed hosts ordered
+        query_plan = list(query_plan)
+        self.assertEqual(query_plan[0], Host("127.0.0.2", SimpleConvictionPolicy))
+        self.assertEqual(set(query_plan[1:]),{Host("127.0.0.3", SimpleConvictionPolicy),
+                                              Host("127.0.0.5", SimpleConvictionPolicy)})
+
+    def test_create_whitelist(self):
+        cluster = Mock(spec=Cluster)
+        hosts = [Host("127.0.0.{}".format(i), SimpleConvictionPolicy) for i in range(1, 6)]
+        for host in hosts:
+            host.set_up()
+
+        child_policy = RoundRobinPolicy()
+
+        hfp = HostFilterPolicy(
+            child_policy=child_policy,
+            predicate=lambda host: host.address == "127.0.0.1" or host.address == "127.0.0.4"
+        )
+        hfp.populate(cluster, hosts)
+
+        # We don't allow randomness for ordering the replicas in RoundRobin
+        hfp._child_policy._position = 0
+
+        mocked_query = Mock()
+        query_plan = hfp.make_query_plan("keyspace", mocked_query)
+        # Only the filtered replicas should be allowed
+        self.assertEqual(set(query_plan), {Host("127.0.0.1", SimpleConvictionPolicy),
+                                           Host("127.0.0.4", SimpleConvictionPolicy)})
+

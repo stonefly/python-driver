@@ -1,4 +1,4 @@
-# Copyright 2013-2015 DataStax, Inc.
+# Copyright 2013-2017 DataStax, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 Connection pooling and host management.
 """
 
+from functools import total_ordering
 import logging
 import socket
 import time
@@ -41,6 +42,7 @@ class NoConnectionsAvailable(Exception):
     pass
 
 
+@total_ordering
 class Host(object):
     """
     Represents a single Cassandra node.
@@ -48,7 +50,21 @@ class Host(object):
 
     address = None
     """
-    The IP address or hostname of the node.
+    The IP address of the node. This is the RPC address the driver uses when connecting to the node
+    """
+
+    broadcast_address = None
+    """
+    broadcast address configured for the node, *if available* ('peer' in system.peers table).
+    This is not present in the ``system.local`` table for older versions of Cassandra. It is also not queried if
+    :attr:`~.Cluster.token_metadata_enabled` is ``False``.
+    """
+
+    listen_address = None
+    """
+    listen address configured for the node, *if available*. This is only available in the ``system.local`` table for newer
+    versions of Cassandra. It is also not queried if :attr:`~.Cluster.token_metadata_enabled` is ``False``.
+    Usually the same as ``broadcast_address`` unless configured differently in cassandra.yaml.
     """
 
     conviction_policy = None
@@ -62,6 +78,23 @@ class Host(object):
     :const:`True` if the node is considered up, :const:`False` if it is
     considered down, and :const:`None` if it is not known if the node is
     up or down.
+    """
+
+    release_version = None
+    """
+    release_version as queried from the control connection system tables
+    """
+
+    dse_version = None
+    """
+    dse_version as queried from the control connection system tables. Only populated when connecting to
+    DSE with this property available. Not queried if :attr:`~.Cluster.token_metadata_enabled` is ``False``.
+    """
+
+    dse_workload = None
+    """
+    DSE workload queried from the control connection system tables. Only populated when connecting to
+    DSE with this property available. Not queried if :attr:`~.Cluster.token_metadata_enabled` is ``False``.
     """
 
     _datacenter = None
@@ -272,16 +305,21 @@ class HostConnection(object):
     host = None
     host_distance = None
     is_shutdown = False
+    shutdown_on_error = False
 
     _session = None
     _connection = None
     _lock = None
+    _keyspace = None
 
     def __init__(self, host, host_distance, session):
         self.host = host
         self.host_distance = host_distance
         self._session = weakref.proxy(session)
         self._lock = Lock()
+        # this is used in conjunction with the connection streams. Not using the connection lock because the connection can be replaced in the lifetime of the pool.
+        self._stream_available_condition = Condition(self._lock)
+        self._is_replacing = False
 
         if host_distance == HostDistance.IGNORED:
             log.debug("Not opening connection to ignored host %s", self.host)
@@ -292,8 +330,9 @@ class HostConnection(object):
 
         log.debug("Initializing connection for host %s", self.host)
         self._connection = session.cluster.connection_factory(host.address)
-        if session.keyspace:
-            self._connection.set_keyspace_blocking(session.keyspace)
+        self._keyspace = session.keyspace
+        if self._keyspace:
+            self._connection.set_keyspace_blocking(self._keyspace)
         log.debug("Finished initializing connection for host %s", self.host)
 
     def borrow_connection(self, timeout):
@@ -305,22 +344,44 @@ class HostConnection(object):
         if not conn:
             raise NoConnectionsAvailable()
 
-        with conn.lock:
-            if conn.in_flight < conn.max_request_id:
-                conn.in_flight += 1
-                return conn, conn.get_request_id()
+        start = time.time()
+        remaining = timeout
+        while True:
+            with conn.lock:
+                if conn.in_flight <= conn.max_request_id:
+                    conn.in_flight += 1
+                    return conn, conn.get_request_id()
+            if timeout is not None:
+                remaining = timeout - time.time() + start
+                if remaining < 0:
+                    break
+            with self._stream_available_condition:
+                self._stream_available_condition.wait(remaining)
 
         raise NoConnectionsAvailable("All request IDs are currently in use")
 
     def return_connection(self, connection):
         with connection.lock:
             connection.in_flight -= 1
+        with self._stream_available_condition:
+            self._stream_available_condition.notify()
 
         if connection.is_defunct or connection.is_closed:
-            log.debug("Defunct or closed connection (%s) returned to pool, potentially "
-                      "marking host %s as down", id(connection), self.host)
-            is_down = self._session.cluster.signal_connection_failure(
-                self.host, connection.last_error, is_host_addition=False)
+            if connection.signaled_error and not self.shutdown_on_error:
+                return
+
+            is_down = False
+            if not connection.signaled_error:
+                log.debug("Defunct or closed connection (%s) returned to pool, potentially "
+                          "marking host %s as down", id(connection), self.host)
+                is_down = self._session.cluster.signal_connection_failure(
+                    self.host, connection.last_error, is_host_addition=False)
+                connection.signaled_error = True
+
+            if self.shutdown_on_error and not is_down:
+                is_down = True
+                self._session.cluster.on_down(self.host, is_host_addition=False)
+
             if is_down:
                 self.shutdown()
             else:
@@ -332,13 +393,23 @@ class HostConnection(object):
                     self._session.submit(self._replace, connection)
 
     def _replace(self, connection):
-        log.debug("Replacing connection (%s) to %s", id(connection), self.host)
-        conn = self._session.cluster.connection_factory(self.host.address)
-        if self._session.keyspace:
-            conn.set_keyspace_blocking(self._session.keyspace)
-        self._connection = conn
         with self._lock:
-            self._is_replacing = False
+            if self.is_shutdown:
+                return
+
+        log.debug("Replacing connection (%s) to %s", id(connection), self.host)
+        try:
+            conn = self._session.cluster.connection_factory(self.host.address)
+            if self._keyspace:
+                conn.set_keyspace_blocking(self._keyspace)
+            self._connection = conn
+        except Exception:
+            log.warning("Failed reconnecting %s. Retrying." % (self.host.address,))
+            self._session.submit(self._replace, connection)
+        else:
+            with self._lock:
+                self._is_replacing = False
+                self._stream_available_condition.notify()
 
     def shutdown(self):
         with self._lock:
@@ -346,9 +417,11 @@ class HostConnection(object):
                 return
             else:
                 self.is_shutdown = True
+            self._stream_available_condition.notify_all()
 
         if self._connection:
             self._connection.close()
+            self._connection = None
 
     def _set_keyspace_for_all_conns(self, keyspace, callback):
         if self.is_shutdown or not self._connection:
@@ -359,6 +432,7 @@ class HostConnection(object):
             errors = [] if not error else [error]
             callback(self, errors)
 
+        self._keyspace = keyspace
         self._connection.set_keyspace_async(keyspace, connection_finished_setting_keyspace)
 
     def get_connections(self):
@@ -392,6 +466,7 @@ class HostConnectionPool(object):
     open_count = 0
     _scheduled_for_creation = 0
     _next_trash_allowed_at = 0
+    _keyspace = None
 
     def __init__(self, host, host_distance, session):
         self.host = host
@@ -406,9 +481,10 @@ class HostConnectionPool(object):
         self._connections = [session.cluster.connection_factory(host.address)
                              for i in range(core_conns)]
 
-        if session.keyspace:
+        self._keyspace = session.keyspace
+        if self._keyspace:
             for conn in self._connections:
-                conn.set_keyspace_blocking(session.keyspace)
+                conn.set_keyspace_blocking(self._keyspace)
 
         self._trash = set()
         self._next_trash_allowed_at = time.time()
@@ -497,17 +573,17 @@ class HostConnectionPool(object):
         max_conns = self._session.cluster.get_max_connections_per_host(self.host_distance)
         with self._lock:
             if self.is_shutdown:
-                return False
+                return True
 
             if self.open_count >= max_conns:
-                return False
+                return True
 
             self.open_count += 1
 
         log.debug("Going to open new connection to host %s", self.host)
         try:
             conn = self._session.cluster.connection_factory(self.host.address)
-            if self._session.keyspace:
+            if self._keyspace:
                 conn.set_keyspace_blocking(self._session.keyspace)
             self._next_trash_allowed_at = time.time() + _MIN_TRASH_INTERVAL
             with self._lock:
@@ -572,14 +648,16 @@ class HostConnectionPool(object):
             in_flight = connection.in_flight
 
         if connection.is_defunct or connection.is_closed:
-            log.debug("Defunct or closed connection (%s) returned to pool, potentially "
-                      "marking host %s as down", id(connection), self.host)
-            is_down = self._session.cluster.signal_connection_failure(
-                self.host, connection.last_error, is_host_addition=False)
-            if is_down:
-                self.shutdown()
-            else:
-                self._replace(connection)
+            if not connection.signaled_error:
+                log.debug("Defunct or closed connection (%s) returned to pool, potentially "
+                          "marking host %s as down", id(connection), self.host)
+                is_down = self._session.cluster.signal_connection_failure(
+                    self.host, connection.last_error, is_host_addition=False)
+                connection.signaled_error = True
+                if is_down:
+                    self.shutdown()
+                else:
+                    self._replace(connection)
         else:
             if connection in self._trash:
                 with connection.lock:
@@ -642,16 +720,21 @@ class HostConnectionPool(object):
 
         if should_replace:
             log.debug("Replacing connection (%s) to %s", id(connection), self.host)
-
-            def close_and_replace():
-                connection.close()
-                self._add_conn_if_under_max()
-
-            self._session.submit(close_and_replace)
+            connection.close()
+            self._session.submit(self._retrying_replace)
         else:
-            # just close it
             log.debug("Closing connection (%s) to %s", id(connection), self.host)
             connection.close()
+
+    def _retrying_replace(self):
+        replaced = False
+        try:
+            replaced = self._add_conn_if_under_max()
+        except Exception:
+            log.exception("Failed replacing connection to %s", self.host)
+        if not replaced:
+            log.debug("Failed replacing connection to %s. Retrying.", self.host)
+            self._session.submit(self._retrying_replace)
 
     def shutdown(self):
         with self._lock:
@@ -701,6 +784,7 @@ class HostConnectionPool(object):
             if not remaining_callbacks:
                 callback(self, errors)
 
+        self._keyspace = keyspace
         for conn in self._connections:
             conn.set_keyspace_async(keyspace, connection_finished_setting_keyspace)
 

@@ -1,4 +1,4 @@
-# Copyright 2015 DataStax, Inc.
+# Copyright 2013-2017 DataStax, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -31,41 +31,48 @@ class TestClassConstruction(BaseCassEngTestCase):
 
     def test_defining_a_non_counter_column_fails(self):
         """ Tests that defining a non counter column field in a model with a counter column fails """
-        with self.assertRaises(ModelDefinitionException):
+        try:
             class model(Model):
                 partition = columns.UUID(primary_key=True, default=uuid4)
                 counter = columns.Counter()
                 text = columns.Text()
+            self.fail("did not raise expected ModelDefinitionException")
+        except ModelDefinitionException:
+            pass
 
 
     def test_defining_a_primary_key_counter_column_fails(self):
         """ Tests that defining primary keys on counter columns fails """
-        with self.assertRaises(TypeError):
+        try:
             class model(Model):
                 partition = columns.UUID(primary_key=True, default=uuid4)
                 cluster = columns.Counter(primary_ley=True)
                 counter = columns.Counter()
+            self.fail("did not raise expected TypeError")
+        except TypeError:
+            pass
 
         # force it
-        with self.assertRaises(ModelDefinitionException):
+        try:
             class model(Model):
                 partition = columns.UUID(primary_key=True, default=uuid4)
                 cluster = columns.Counter()
                 cluster.primary_key = True
                 counter = columns.Counter()
+            self.fail("did not raise expected ModelDefinitionException")
+        except ModelDefinitionException:
+            pass
 
 
 class TestCounterColumn(BaseCassEngTestCase):
 
     @classmethod
     def setUpClass(cls):
-        super(TestCounterColumn, cls).setUpClass()
         drop_table(TestCounterModel)
         sync_table(TestCounterModel)
 
     @classmethod
     def tearDownClass(cls):
-        super(TestCounterColumn, cls).tearDownClass()
         drop_table(TestCounterModel)
 
     def test_updates(self):
@@ -105,3 +112,19 @@ class TestCounterColumn(BaseCassEngTestCase):
         instance = TestCounterModel()
         assert instance.counter == 0
 
+    def test_save_after_no_update(self):
+        expected_value = 15
+        instance = TestCounterModel.create()
+        instance.update(counter=expected_value)
+
+        # read back
+        instance = TestCounterModel.get(partition=instance.partition)
+        self.assertEqual(instance.counter, expected_value)
+
+        # save after doing nothing
+        instance.save()
+        self.assertEqual(instance.counter, expected_value)
+
+        # make sure there was no increment
+        instance = TestCounterModel.get(partition=instance.partition)
+        self.assertEqual(instance.counter, expected_value)

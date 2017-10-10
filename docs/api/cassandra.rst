@@ -14,6 +14,23 @@
 .. autoclass:: ConsistencyLevel
    :members:
 
+.. autoclass:: ProtocolVersion
+   :members:
+
+.. autoclass:: UserFunctionDescriptor
+   :members:
+   :inherited-members:
+
+.. autoclass:: UserAggregateDescriptor
+   :members:
+   :inherited-members:
+
+.. autoexception:: DriverException()
+   :members:
+
+.. autoexception:: RequestExecutionException()
+   :members:
+
 .. autoexception:: Unavailable()
    :members:
 
@@ -24,6 +41,24 @@
    :members:
 
 .. autoexception:: WriteTimeout()
+   :members:
+
+.. autoexception:: CoordinationFailure()
+   :members:
+
+.. autoexception:: ReadFailure()
+   :members:
+
+.. autoexception:: WriteFailure()
+   :members:
+
+.. autoexception:: FunctionFailure()
+   :members:
+
+.. autoexception:: RequestValidationException()
+   :members:
+
+.. autoexception:: ConfigurationException()
    :members:
 
 .. autoexception:: AlreadyExists()

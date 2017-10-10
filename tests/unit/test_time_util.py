@@ -1,4 +1,4 @@
-# Copyright 2013-2015 DataStax, Inc.
+# Copyright 2013-2017 DataStax, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -36,17 +36,19 @@ class TimeUtilTest(unittest.TestCase):
 
         self.assertEqual(util.datetime_from_timestamp(0.123456), datetime.datetime(1970, 1, 1, 0, 0, 0, 123456))
 
+        self.assertEqual(util.datetime_from_timestamp(2177403010.123456), datetime.datetime(2038, 12, 31, 10, 10, 10, 123456))
+
     def test_times_from_uuid1(self):
         node = uuid.getnode()
         now = time.time()
         u = uuid.uuid1(node, 0)
 
         t = util.unix_time_from_uuid1(u)
-        self.assertAlmostEqual(now, t, 3)
+        self.assertAlmostEqual(now, t, 2)
 
         dt = util.datetime_from_uuid1(u)
         t = calendar.timegm(dt.timetuple()) + dt.microsecond / 1e6
-        self.assertAlmostEqual(now, t, 3)
+        self.assertAlmostEqual(now, t, 2)
 
     def test_uuid_from_time(self):
         t = time.time()

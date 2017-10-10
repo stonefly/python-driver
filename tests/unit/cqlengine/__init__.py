@@ -1,4 +1,4 @@
-# Copyright 2015 DataStax, Inc.
+# Copyright 2013-2017 DataStax, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,12 +12,3 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest import TestCase
-from cassandra.cqlengine.operators import BaseQueryOperator, QueryOperatorException
-
-
-class BaseOperatorTest(TestCase):
-
-    def test_get_operator_cannot_be_called_from_base_class(self):
-        with self.assertRaises(QueryOperatorException):
-            BaseQueryOperator.get_operator('*')

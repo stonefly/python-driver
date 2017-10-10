@@ -1,4 +1,4 @@
-# Copyright 2013-2015 DataStax, Inc.
+# Copyright 2013-2017 DataStax, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -26,13 +26,17 @@ import cassandra
 from cassandra.cqltypes import (BooleanType, lookup_casstype_simple, lookup_casstype,
                                 LongType, DecimalType, SetType, cql_typename,
                                 CassandraType, UTF8Type, parse_casstype_args,
-                                SimpleDateType, TimeType,
+                                SimpleDateType, TimeType, ByteType, ShortType,
                                 EmptyValue, _CassandraType, DateType, int64_pack)
 from cassandra.encoder import cql_quote
 from cassandra.protocol import (write_string, read_longstring, write_stringmap,
                                 read_stringmap, read_inet, write_inet,
                                 read_string, write_longstring)
 from cassandra.query import named_tuple_factory
+from cassandra.pool import Host
+from cassandra.policies import SimpleConvictionPolicy, ConvictionPolicy
+from cassandra.util import Date, Time
+from cassandra.metadata import Token
 
 
 class TypeTests(unittest.TestCase):
@@ -55,6 +59,8 @@ class TypeTests(unittest.TestCase):
         self.assertEqual(lookup_casstype_simple('UTF8Type'), cassandra.cqltypes.UTF8Type)
         self.assertEqual(lookup_casstype_simple('DateType'), cassandra.cqltypes.DateType)
         self.assertEqual(lookup_casstype_simple('SimpleDateType'), cassandra.cqltypes.SimpleDateType)
+        self.assertEqual(lookup_casstype_simple('ByteType'), cassandra.cqltypes.ByteType)
+        self.assertEqual(lookup_casstype_simple('ShortType'), cassandra.cqltypes.ShortType)
         self.assertEqual(lookup_casstype_simple('TimeUUIDType'), cassandra.cqltypes.TimeUUIDType)
         self.assertEqual(lookup_casstype_simple('TimeType'), cassandra.cqltypes.TimeType)
         self.assertEqual(lookup_casstype_simple('UUIDType'), cassandra.cqltypes.UUIDType)
@@ -65,6 +71,7 @@ class TypeTests(unittest.TestCase):
         self.assertEqual(lookup_casstype_simple('CompositeType'), cassandra.cqltypes.CompositeType)
         self.assertEqual(lookup_casstype_simple('ColumnToCollectionType'), cassandra.cqltypes.ColumnToCollectionType)
         self.assertEqual(lookup_casstype_simple('ReversedType'), cassandra.cqltypes.ReversedType)
+        self.assertEqual(lookup_casstype_simple('DurationType'), cassandra.cqltypes.DurationType)
 
         self.assertEqual(str(lookup_casstype_simple('unknown')), str(cassandra.cqltypes.mkUnrecognizedType('unknown')))
 
@@ -87,6 +94,8 @@ class TypeTests(unittest.TestCase):
         self.assertEqual(lookup_casstype('UTF8Type'), cassandra.cqltypes.UTF8Type)
         self.assertEqual(lookup_casstype('DateType'), cassandra.cqltypes.DateType)
         self.assertEqual(lookup_casstype('TimeType'), cassandra.cqltypes.TimeType)
+        self.assertEqual(lookup_casstype('ByteType'), cassandra.cqltypes.ByteType)
+        self.assertEqual(lookup_casstype('ShortType'), cassandra.cqltypes.ShortType)
         self.assertEqual(lookup_casstype('TimeUUIDType'), cassandra.cqltypes.TimeUUIDType)
         self.assertEqual(lookup_casstype('UUIDType'), cassandra.cqltypes.UUIDType)
         self.assertEqual(lookup_casstype('IntegerType'), cassandra.cqltypes.IntegerType)
@@ -96,15 +105,11 @@ class TypeTests(unittest.TestCase):
         self.assertEqual(lookup_casstype('CompositeType'), cassandra.cqltypes.CompositeType)
         self.assertEqual(lookup_casstype('ColumnToCollectionType'), cassandra.cqltypes.ColumnToCollectionType)
         self.assertEqual(lookup_casstype('ReversedType'), cassandra.cqltypes.ReversedType)
+        self.assertEqual(lookup_casstype('DurationType'), cassandra.cqltypes.DurationType)
 
         self.assertEqual(str(lookup_casstype('unknown')), str(cassandra.cqltypes.mkUnrecognizedType('unknown')))
 
         self.assertRaises(ValueError, lookup_casstype, 'AsciiType~')
-
-        # TODO: Do a few more tests
-        # "I would say some parameterized and nested types would be good to test,
-        # like "MapType(AsciiType, IntegerType)" and "ReversedType(AsciiType)"
-        self.assertEqual(str(lookup_casstype(BooleanType(True))), str(BooleanType(True)))
 
     def test_casstype_parameterized(self):
         self.assertEqual(LongType.cass_parameterized_type_with(()), 'LongType')
@@ -121,134 +126,7 @@ class TypeTests(unittest.TestCase):
         # Ensure all formats can be parsed, without exception
         for format in cassandra.cqltypes.cql_timestamp_formats:
             date_string = str(datetime.datetime.now().strftime(format))
-            cassandra.cqltypes.DateType(date_string)
-
-    def test_simpledate(self):
-        """
-        Test cassandra.cqltypes.SimpleDateType() construction
-        """
-        Date = cassandra.util.Date
-        # from datetime
-        expected_dt = datetime.datetime(1492, 10, 12, 1, 1)
-        expected_date = Date(expected_dt)
-        self.assertEqual(str(expected_date), '1492-10-12')
-
-        # from string
-        sd = SimpleDateType('1492-10-12')
-        self.assertEqual(sd.val, expected_date)
-        sd = SimpleDateType('+1492-10-12')
-        self.assertEqual(sd.val, expected_date)
-
-        # Date
-        sd = SimpleDateType(expected_date)
-        self.assertEqual(sd.val, expected_date)
-
-        # date
-        sd = SimpleDateType(datetime.date(expected_dt.year, expected_dt.month, expected_dt.day))
-        self.assertEqual(sd.val, expected_date)
-
-        # days
-        sd = SimpleDateType(0)
-        self.assertEqual(sd.val, Date(datetime.date(1970, 1, 1)))
-        sd = SimpleDateType(-1)
-        self.assertEqual(sd.val, Date(datetime.date(1969, 12, 31)))
-        sd = SimpleDateType(1)
-        self.assertEqual(sd.val, Date(datetime.date(1970, 1, 2)))
-        # limits
-        min_builtin = Date(datetime.date(1, 1, 1))
-        max_builtin = Date(datetime.date(9999, 12, 31))
-        self.assertEqual(SimpleDateType(min_builtin.days_from_epoch).val, min_builtin)
-        self.assertEqual(SimpleDateType(max_builtin.days_from_epoch).val, max_builtin)
-        # just proving we can construct with on offset outside buildin range
-        self.assertEqual(SimpleDateType(min_builtin.days_from_epoch - 1).val.days_from_epoch,
-                         min_builtin.days_from_epoch - 1)
-        self.assertEqual(SimpleDateType(max_builtin.days_from_epoch + 1).val.days_from_epoch,
-                         max_builtin.days_from_epoch + 1)
-
-        # no contruct
-        self.assertRaises(ValueError, SimpleDateType, '-1999-10-10')
-        self.assertRaises(TypeError, SimpleDateType, 1.234)
-
-        # str
-        date_str = '2015-03-16'
-        self.assertEqual(str(Date(date_str)), date_str)
-        # out of range
-        self.assertEqual(str(Date(2932897)), '2932897')
-        self.assertEqual(repr(Date(1)), 'Date(1)')
-
-        # eq other types
-        self.assertEqual(Date(1234), 1234)
-        self.assertEqual(Date(1), datetime.date(1970, 1, 2))
-        self.assertFalse(Date(2932897) == datetime.date(9999, 12, 31))  # date can't represent year > 9999
-        self.assertEqual(Date(2932897), 2932897)
-
-    def test_time(self):
-        """
-        Test cassandra.cqltypes.TimeType() construction
-        """
-        Time = cassandra.util.Time
-        one_micro = 1000
-        one_milli = 1000 * one_micro
-        one_second = 1000 * one_milli
-        one_minute = 60 * one_second
-        one_hour = 60 * one_minute
-
-        # from strings
-        tt = TimeType('00:00:00.000000001')
-        self.assertEqual(tt.val, 1)
-        tt = TimeType('00:00:00.000001')
-        self.assertEqual(tt.val, one_micro)
-        tt = TimeType('00:00:00.001')
-        self.assertEqual(tt.val, one_milli)
-        tt = TimeType('00:00:01')
-        self.assertEqual(tt.val, one_second)
-        tt = TimeType('00:01:00')
-        self.assertEqual(tt.val, one_minute)
-        tt = TimeType('01:00:00')
-        self.assertEqual(tt.val, one_hour)
-        tt = TimeType('01:00:00.')
-        self.assertEqual(tt.val, one_hour)
-
-        tt = TimeType('23:59:59.1')
-        tt = TimeType('23:59:59.12')
-        tt = TimeType('23:59:59.123')
-        tt = TimeType('23:59:59.1234')
-        tt = TimeType('23:59:59.12345')
-
-        tt = TimeType('23:59:59.123456')
-        self.assertEqual(tt.val, 23 * one_hour + 59 * one_minute + 59 * one_second + 123 * one_milli + 456 * one_micro)
-
-        tt = TimeType('23:59:59.1234567')
-        self.assertEqual(tt.val, 23 * one_hour + 59 * one_minute + 59 * one_second + 123 * one_milli + 456 * one_micro + 700)
-
-        tt = TimeType('23:59:59.12345678')
-        self.assertEqual(tt.val, 23 * one_hour + 59 * one_minute + 59 * one_second + 123 * one_milli + 456 * one_micro + 780)
-
-        tt = TimeType('23:59:59.123456789')
-        self.assertEqual(tt.val, 23 * one_hour + 59 * one_minute + 59 * one_second + 123 * one_milli + 456 * one_micro + 789)
-
-        # from int
-        tt = TimeType(12345678)
-        self.assertEqual(tt.val, 12345678)
-
-        # from time
-        expected_time = datetime.time(12, 1, 2, 3)
-        tt = TimeType(expected_time)
-        self.assertEqual(tt.val, expected_time)
-
-        # util.Time self equality
-        self.assertEqual(Time(1234), Time(1234))
-
-        # str
-        time_str = '12:13:14.123456789'
-        self.assertEqual(str(Time(time_str)), time_str)
-        self.assertEqual(repr(Time(1)), 'Time(1)')
-
-        # no construct
-        self.assertRaises(ValueError, TimeType, '1999-10-10 11:11:11.1234')
-        self.assertRaises(TypeError, TimeType, 1.234)
-        self.assertRaises(ValueError, TimeType, 123456789000000)
-        self.assertRaises(TypeError, TimeType, datetime.datetime(2004, 12, 23, 11, 11, 1))
+            cassandra.cqltypes.DateType.interpret_datestring(date_string)
 
     def test_cql_typename(self):
         """
@@ -305,12 +183,6 @@ class TypeTests(unittest.TestCase):
     def test_empty_value(self):
         self.assertEqual(str(EmptyValue()), 'EMPTY')
 
-    def test_cassandratype_base(self):
-        cassandra_type = _CassandraType('randomvaluetocheck')
-        self.assertEqual(cassandra_type.val, 'randomvaluetocheck')
-        self.assertEqual(cassandra_type.validate('randomvaluetocheck2'), 'randomvaluetocheck2')
-        self.assertEqual(cassandra_type.val, 'randomvaluetocheck')
-
     def test_datetype(self):
         now_time_seconds = time.time()
         now_datetime = datetime.datetime.utcfromtimestamp(now_time_seconds)
@@ -321,14 +193,6 @@ class TypeTests(unittest.TestCase):
         # same results serialized
         self.assertEqual(DateType.serialize(now_datetime, 0), DateType.serialize(now_timestamp, 0))
 
-        # from timestamp
-        date_type = DateType(now_timestamp)
-        self.assertEqual(date_type.my_timestamp(), now_timestamp)
-
-        # from datetime object
-        date_type = DateType(now_datetime)
-        self.assertEqual(date_type.my_timestamp(), now_datetime)
-
         # deserialize
         # epoc
         expected = 0
@@ -336,17 +200,19 @@ class TypeTests(unittest.TestCase):
 
         # beyond 32b
         expected = 2 ** 33
-        self.assertEqual(DateType.deserialize(int64_pack(1000 * expected), 0), datetime.datetime.utcfromtimestamp(expected))
+        self.assertEqual(DateType.deserialize(int64_pack(1000 * expected), 0), datetime.datetime(2242, 3, 16, 12, 56, 32))
 
         # less than epoc (PYTHON-119)
         expected = -770172256
         self.assertEqual(DateType.deserialize(int64_pack(1000 * expected), 0), datetime.datetime(1945, 8, 5, 23, 15, 44))
 
-        self.assertRaises(ValueError, date_type.interpret_datestring, 'fakestring')
-
         # work around rounding difference among Python versions (PYTHON-230)
         expected = 1424817268.274
         self.assertEqual(DateType.deserialize(int64_pack(int(1000 * expected)), 0), datetime.datetime(2015, 2, 24, 22, 34, 28, 274000))
+
+        # Large date overflow (PYTHON-452)
+        expected = 2177403010.123
+        self.assertEqual(DateType.deserialize(int64_pack(int(1000 * expected)), 0), datetime.datetime(2038, 12, 31, 10, 10, 10, 123000))
 
     def test_write_read_string(self):
         with tempfile.TemporaryFile() as f:
@@ -386,3 +252,135 @@ class TypeTests(unittest.TestCase):
         self.assertEqual(cql_quote(u'test'), "'test'")
         self.assertEqual(cql_quote('test'), "'test'")
         self.assertEqual(cql_quote(0), '0')
+
+
+class TestOrdering(unittest.TestCase):
+    def _check_order_consistency(self, smaller, bigger, equal=False):
+        self.assertLessEqual(smaller, bigger)
+        self.assertGreaterEqual(bigger, smaller)
+        if equal:
+            self.assertEqual(smaller, bigger)
+        else:
+            self.assertNotEqual(smaller, bigger)
+            self.assertLess(smaller, bigger)
+            self.assertGreater(bigger, smaller)
+
+    def _shuffle_lists(self, *args):
+        return [item for sublist in zip(*args) for item in sublist]
+
+    def _check_sequence_consistency(self, ordered_sequence, equal=False):
+        for i, el in enumerate(ordered_sequence):
+            for previous in ordered_sequence[:i]:
+                self._check_order_consistency(previous, el, equal)
+            for posterior in ordered_sequence[i + 1:]:
+                self._check_order_consistency(el, posterior, equal)
+
+    def test_host_order(self):
+        """
+        Test Host class is ordered consistently
+
+        @since 3.9
+        @jira_ticket PYTHON-714
+        @expected_result the hosts are ordered correctly
+
+        @test_category data_types
+        """
+        hosts = [Host(addr, SimpleConvictionPolicy) for addr in
+                 ("127.0.0.1", "127.0.0.2", "127.0.0.3", "127.0.0.4")]
+        hosts_equal = [Host(addr, SimpleConvictionPolicy) for addr in
+                       ("127.0.0.1", "127.0.0.1")]
+        hosts_equal_conviction = [Host("127.0.0.1", SimpleConvictionPolicy), Host("127.0.0.1", ConvictionPolicy)]
+        self._check_sequence_consistency(hosts)
+        self._check_sequence_consistency(hosts_equal, equal=True)
+        self._check_sequence_consistency(hosts_equal_conviction, equal=True)
+
+    def test_date_order(self):
+        """
+        Test Date class is ordered consistently
+
+        @since 3.9
+        @jira_ticket PYTHON-714
+        @expected_result the dates are ordered correctly
+
+        @test_category data_types
+        """
+        dates_from_string = [Date("2017-01-01"), Date("2017-01-05"), Date("2017-01-09"), Date("2017-01-13")]
+        dates_from_string_equal = [Date("2017-01-01"), Date("2017-01-01")]
+        self._check_sequence_consistency(dates_from_string)
+        self._check_sequence_consistency(dates_from_string_equal, equal=True)
+
+        date_format = "%Y-%m-%d"
+
+        dates_from_value = [
+            Date((datetime.datetime.strptime(dtstr, date_format) -
+                  datetime.datetime(1970, 1, 1)).days)
+            for dtstr in ("2017-01-02", "2017-01-06", "2017-01-10", "2017-01-14")
+        ]
+        dates_from_value_equal = [Date(1), Date(1)]
+        self._check_sequence_consistency(dates_from_value)
+        self._check_sequence_consistency(dates_from_value_equal, equal=True)
+
+        dates_from_datetime = [Date(datetime.datetime.strptime(dtstr, date_format))
+                               for dtstr in ("2017-01-03", "2017-01-07", "2017-01-11", "2017-01-15")]
+        dates_from_datetime_equal = [Date(datetime.datetime.strptime("2017-01-01", date_format)),
+                               Date(datetime.datetime.strptime("2017-01-01", date_format))]
+        self._check_sequence_consistency(dates_from_datetime)
+        self._check_sequence_consistency(dates_from_datetime_equal, equal=True)
+
+        dates_from_date = [
+            Date(datetime.datetime.strptime(dtstr, date_format).date()) for dtstr in
+            ("2017-01-04", "2017-01-08", "2017-01-12", "2017-01-16")
+        ]
+        dates_from_date_equal = [datetime.datetime.strptime(dtstr, date_format) for dtstr in
+                                 ("2017-01-09", "2017-01-9")]
+
+        self._check_sequence_consistency(dates_from_date)
+        self._check_sequence_consistency(dates_from_date_equal, equal=True)
+
+        self._check_sequence_consistency(self._shuffle_lists(dates_from_string, dates_from_value,
+                                                             dates_from_datetime, dates_from_date))
+
+    def test_timer_order(self):
+        """
+        Test Time class is ordered consistently
+
+        @since 3.9
+        @jira_ticket PYTHON-714
+        @expected_result the times are ordered correctly
+
+        @test_category data_types
+        """
+        time_from_int = [Time(1000), Time(4000), Time(7000), Time(10000)]
+        time_from_int_equal = [Time(1), Time(1)]
+        self._check_sequence_consistency(time_from_int)
+        self._check_sequence_consistency(time_from_int_equal, equal=True)
+
+        time_from_datetime = [Time(datetime.time(hour=0, minute=0, second=0, microsecond=us))
+                              for us in (2, 5, 8, 11)]
+        time_from_datetime_equal = [Time(datetime.time(hour=0, minute=0, second=0, microsecond=us))
+                                    for us in (1, 1)]
+        self._check_sequence_consistency(time_from_datetime)
+        self._check_sequence_consistency(time_from_datetime_equal, equal=True)
+
+        time_from_string = [Time("00:00:00.000003000"), Time("00:00:00.000006000"),
+                            Time("00:00:00.000009000"), Time("00:00:00.000012000")]
+        time_from_string_equal = [Time("00:00:00.000004000"), Time("00:00:00.000004000")]
+        self._check_sequence_consistency(time_from_string)
+        self._check_sequence_consistency(time_from_string_equal, equal=True)
+
+        self._check_sequence_consistency(self._shuffle_lists(time_from_int, time_from_datetime, time_from_string))
+
+    def test_token_order(self):
+        """
+        Test Token class is ordered consistently
+
+        @since 3.9
+        @jira_ticket PYTHON-714
+        @expected_result the tokens are ordered correctly
+
+        @test_category data_types
+        """
+        tokens = [Token(1), Token(2), Token(3), Token(4)]
+        tokens_equal = [Token(1), Token(1)]
+        self._check_sequence_consistency(tokens)
+        self._check_sequence_consistency(tokens_equal, equal=True)

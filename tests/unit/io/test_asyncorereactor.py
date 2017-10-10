@@ -1,4 +1,4 @@
-# Copyright 2013-2015 DataStax, Inc.
+# Copyright 2013-2017 DataStax, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,23 +20,21 @@ except ImportError:
     import unittest # noqa
 
 import errno
+import math
+import time
+from mock import patch, Mock
 import os
-
 from six import BytesIO
-
 import socket
 from socket import error as socket_error
-
-from mock import patch, Mock
-
 from cassandra.connection import (HEADER_DIRECTION_TO_CLIENT,
-                                  ConnectionException)
+                                  ConnectionException, ProtocolError,Timer)
 from cassandra.io.asyncorereactor import AsyncoreConnection
 from cassandra.protocol import (write_stringmultimap, write_int, write_string,
                                 SupportedMessage, ReadyMessage, ServerError)
 from cassandra.marshal import uint8_pack, uint32_pack, int32_pack
-
 from tests import is_monkey_patched
+from tests.unit.io.utils import submit_and_wait_for_completion, TimerCallback
 
 
 class AsyncoreConnectionTest(unittest.TestCase):
@@ -44,7 +42,7 @@ class AsyncoreConnectionTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if is_monkey_patched():
-            raise unittest.SkipTest("monkey-patching detected")
+            return
         AsyncoreConnection.initialize_reactor()
         cls.socket_patcher = patch('socket.socket', spec=socket.socket)
         cls.mock_socket = cls.socket_patcher.start()
@@ -56,10 +54,16 @@ class AsyncoreConnectionTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        if is_monkey_patched():
+            return
         cls.socket_patcher.stop()
 
+    def setUp(self):
+        if is_monkey_patched():
+            raise unittest.SkipTest("Can't test asyncore with monkey patching")
+
     def make_connection(self):
-        c = AsyncoreConnection('1.2.3.4', cql_version='3.0.1')
+        c = AsyncoreConnection('1.2.3.4', cql_version='3.0.1', connect_timeout=5)
         c.socket = Mock()
         c.socket.send.side_effect = lambda x: len(x)
         return c
@@ -132,7 +136,7 @@ class AsyncoreConnectionTest(unittest.TestCase):
 
         c.socket.recv.side_effect = side_effect
         c.handle_read()
-        self.assertEqual(c._total_reqd_bytes, 20000 + len(header))
+        self.assertEqual(c._current_frame.end_pos, 20000 + len(header))
         # the EAGAIN prevents it from reading the last 100 bytes
         c._iobuf.seek(0, os.SEEK_END)
         pos = c._iobuf.tell()
@@ -159,7 +163,7 @@ class AsyncoreConnectionTest(unittest.TestCase):
         # make sure it errored correctly
         self.assertTrue(c.is_defunct)
         self.assertTrue(c.connected_event.is_set())
-        self.assertIsInstance(c.last_error, ConnectionException)
+        self.assertIsInstance(c.last_error, ProtocolError)
 
     def test_error_message_on_startup(self, *args):
         c = self.make_connection()
@@ -217,13 +221,18 @@ class AsyncoreConnectionTest(unittest.TestCase):
         c = self.make_connection()
 
         # only write the first four bytes of the OptionsMessage
+        write_size = 4
         c.socket.send.side_effect = None
-        c.socket.send.return_value = 4
+        c.socket.send.return_value = write_size
         c.handle_write()
 
+        msg_size = 9  # v3+ frame header
+        expected_writes = int(math.ceil(float(msg_size) / write_size))
+        size_mod = msg_size % write_size
+        last_write_size = size_mod if size_mod else write_size
         self.assertFalse(c.is_defunct)
-        self.assertEqual(2, c.socket.send.call_count)
-        self.assertEqual(4, len(c.socket.send.call_args[0][0]))
+        self.assertEqual(expected_writes, c.socket.send.call_count)
+        self.assertEqual(last_write_size, len(c.socket.send.call_args[0][0]))
 
     def test_socket_error_on_read(self, *args):
         c = self.make_connection()
@@ -291,3 +300,37 @@ class AsyncoreConnectionTest(unittest.TestCase):
 
         self.assertTrue(c.connected_event.is_set())
         self.assertFalse(c.is_defunct)
+
+    def test_multi_timer_validation(self, *args):
+        """
+        Verify that timer timeouts are honored appropriately
+        """
+        c = self.make_connection()
+        # Tests timers submitted in order at various timeouts
+        submit_and_wait_for_completion(self, AsyncoreConnection, 0, 100, 1, 100)
+        # Tests timers submitted in reverse order at various timeouts
+        submit_and_wait_for_completion(self, AsyncoreConnection, 100, 0, -1, 100)
+        # Tests timers submitted in varying order at various timeouts
+        submit_and_wait_for_completion(self, AsyncoreConnection, 0, 100, 1, 100, True)
+
+    def test_timer_cancellation(self):
+        """
+        Verify that timer cancellation is honored
+        """
+
+        # Various lists for tracking callback stage
+        connection = self.make_connection()
+        timeout = .1
+        callback = TimerCallback(timeout)
+        timer = connection.create_timer(timeout, callback.invoke)
+        timer.cancel()
+        # Release context allow for timer thread to run.
+        time.sleep(.2)
+        timer_manager = connection._loop._timers
+        # Assert that the cancellation was honored
+        self.assertFalse(timer_manager._queue)
+        self.assertFalse(timer_manager._new_timers)
+        self.assertFalse(callback.was_invoked())
+
+
+

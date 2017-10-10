@@ -1,3 +1,586 @@
+3.12.0
+======
+
+Features
+--------
+* Send keyspace in QUERY, PREPARE, and BATCH messages (PYTHON-678)
+* Add IPv4Address/IPv6Address support for inet types (PYTHON-751)
+* WriteType.CDC and VIEW missing (PYTHON-794)
+* Warn on Cluster init if contact points are specified but LBP isn't (PYTHON-812)
+
+Bug Fixes
+---------
+* Both _set_final_exception/result called for the same ResponseFuture (PYTHON-630)
+* Use of DCAwareRoundRobinPolicy raises NoHostAvailable exception (PYTHON-781)
+* Not create two sessions by default in CQLEngine (PYTHON-814)
+* Bug when subclassing AyncoreConnection (PYTHON-827)
+* Error at cleanup when closing the asyncore connections (PYTHON-829)
+* Fix sites where `sessions` can change during iteration (PYTHON-793)
+* cqlengine: allow min_length=0 for Ascii and Text column types (PYTHON-735)
+* Rare exception when "sys.exit(0)" after query timeouts (PYTHON-752)
+
+Others
+------
+* Remove DeprecationWarning when using WhiteListRoundRobinPolicy (PYTHON-810)
+
+Other
+-----
+
+* Bump Cython dependency version to 0.27 (PYTHON-833)
+
+3.11.0
+======
+July 24, 2017
+
+
+Features
+--------
+* Add idle_heartbeat_timeout cluster option to tune how long to wait for heartbeat responses. (PYTHON-762)
+* Add HostFilterPolicy (PYTHON-761)
+
+Bug Fixes
+---------
+* is_idempotent flag is not propagated from PreparedStatement to BoundStatement (PYTHON-736)
+* Fix asyncore hang on exit (PYTHON-767)
+* Driver takes several minutes to remove a bad host from session (PYTHON-762)
+* Installation doesn't always fall back to no cython in Windows (PYTHON-763)
+* Avoid to replace a connection that is supposed to shutdown (PYTHON-772)
+* request_ids may not be returned to the pool (PYTHON-739)
+* Fix murmur3 on big-endian systems (PYTHON-653)
+* Ensure unused connections are closed if a Session is deleted by the GC (PYTHON-774)
+* Fix .values_list by using db names internally (cqlengine) (PYTHON-785)
+
+
+Other
+-----
+* Bump Cython dependency version to 0.25.2 (PYTHON-754)
+* Fix DeprecationWarning when using lz4 (PYTHON-769)
+* Deprecate WhiteListRoundRobinPolicy (PYTHON-759)
+* Improve upgrade guide for materializing pages (PYTHON-464)
+* Documentation for time/date specifies timestamp inupt as microseconds (PYTHON-717)
+* Point to DSA Slack, not IRC, in docs index
+
+3.10.0
+======
+May 24, 2017
+
+Features
+--------
+* Add Duration type to cqlengine (PYTHON-750)
+* Community PR review: Raise error on primary key update only if its value changed (PYTHON-705)
+* get_query_trace() contract is ambiguous (PYTHON-196)
+
+Bug Fixes
+---------
+* Queries using speculative execution policy timeout prematurely (PYTHON-755)
+* Fix `map` where results are not consumed (PYTHON-749)
+* Driver fails to encode Duration's with large values (PYTHON-747)
+* UDT values are not updated correctly in CQLEngine (PYTHON-743)
+* UDT types are not validated in CQLEngine (PYTHON-742)
+* to_python is not implemented for types columns.Type and columns.Date in CQLEngine (PYTHON-741)
+* Clients spin infinitely trying to connect to a host that is drained (PYTHON-734)
+* Resulset.get_query_trace returns empty trace sometimes (PYTHON-730)
+* Memory grows and doesn't get removed (PYTHON-720)
+* Fix RuntimeError caused by change dict size during iteration (PYTHON-708)
+* fix ExponentialReconnectionPolicy may throw OverflowError problem (PYTHON-707)
+* Avoid using nonexistent prepared statement in ResponseFuture (PYTHON-706)
+
+Other
+-----
+* Update README (PYTHON-746)
+* Test python versions 3.5 and 3.6 (PYTHON-737)
+* Docs Warning About Prepare "select *" (PYTHON-626)
+* Increase Coverage in CqlEngine Test Suite (PYTHON-505)
+* Example SSL connection code does not verify server certificates (PYTHON-469)
+
+3.9.0
+=====
+
+Features
+--------
+* cqlengine: remove elements by key from a map (PYTHON-688)
+
+Bug Fixes
+---------
+* improve error handling when connecting to non-existent keyspace (PYTHON-665)
+* Sockets associated with sessions not getting cleaned up on session.shutdown() (PYTHON-673)
+* rare flake on integration.standard.test_cluster.ClusterTests.test_clone_shared_lbp (PYTHON-727)
+* MontonicTimestampGenerator.__init__ ignores class defaults (PYTHON-728)
+* race where callback or errback for request may not be called (PYTHON-733)
+* cqlengine: model.update() should not update columns with a default value that hasn't changed (PYTHON-657)
+* cqlengine: field value manager's explicit flag is True when queried back from cassandra (PYTHON-719)
+
+Other
+-----
+* Connection not closed in example_mapper (PYTHON-723)
+* Remove mention of pre-2.0 C* versions from OSS 3.0+ docs (PYTHON-710)
+
+3.8.1
+=====
+March 16, 2017
+
+Bug Fixes
+---------
+
+* implement __le__/__ge__/__ne__ on some custom types (PYTHON-714)
+* Fix bug in eventlet and gevent reactors that could cause hangs (PYTHON-721)
+* Fix DecimalType regression (PYTHON-724)
+
+3.8.0
+=====
+
+Features
+--------
+
+* Quote index names in metadata CQL generation (PYTHON-616)
+* On column deserialization failure, keep error message consistent between python and cython (PYTHON-631)
+* TokenAwarePolicy always sends requests to the same replica for a given key (PYTHON-643)
+* Added cql types to result set (PYTHON-648)
+* Add __len__ to BatchStatement (PYTHON-650)
+* Duration Type for Cassandra (PYTHON-655)
+* Send flags with PREPARE message in v5 (PYTHON-684)
+
+Bug Fixes
+---------
+
+* Potential Timing issue if application exits prior to session pool initialization (PYTHON-636)
+* "Host X.X.X.X has been marked down" without any exceptions (PYTHON-640)
+* NoHostAvailable or OperationTimedOut when using execute_concurrent with a generator that inserts into more than one table (PYTHON-642)
+* ResponseFuture creates Timers and don't cancel them even when result is received which leads to memory leaks (PYTHON-644)
+* Driver cannot connect to Cassandra version > 3 (PYTHON-646)
+* Unable to import model using UserType without setuping connection since 3.7 (PYTHON-649)
+* Don't prepare queries on ignored hosts on_up (PYTHON-669)
+* Sockets associated with sessions not getting cleaned up on session.shutdown() (PYTHON-673)
+* Make client timestamps strictly monotonic (PYTHON-676)
+* cassandra.cqlengine.connection.register_connection broken when hosts=None (PYTHON-692)
+
+Other
+-----
+
+* Create a cqlengine doc section explaining None semantics (PYTHON-623)
+* Resolve warnings in documentation generation (PYTHON-645)
+* Cython dependency (PYTHON-686)
+* Drop Support for Python 2.6 (PYTHON-690)
+
+3.7.1
+=====
+October 26, 2016
+
+Bug Fixes
+---------
+* Cython upgrade has broken stable version of cassandra-driver (PYTHON-656)
+
+3.7.0
+=====
+September 13, 2016
+
+Features
+--------
+* Add v5 protocol failure map (PYTHON-619)
+* Don't return from initial connect on first error (PYTHON-617)
+* Indicate failed column when deserialization fails (PYTHON-361)
+* Let Cluster.refresh_nodes force a token map rebuild (PYTHON-349)
+* Refresh UDTs after "keyspace updated" event with v1/v2 protocol (PYTHON-106)
+* EC2 Address Resolver (PYTHON-198)
+* Speculative query retries (PYTHON-218)
+* Expose paging state in API (PYTHON-200)
+* Don't mark host down while one connection is active (PYTHON-498)
+* Query request size information (PYTHON-284)
+* Avoid quadratic ring processing with invalid replication factors (PYTHON-379)
+* Improve Connection/Pool creation concurrency on startup (PYTHON-82)
+* Add beta version native protocol flag (PYTHON-614)
+* cqlengine: Connections: support of multiple keyspaces and sessions (PYTHON-613)
+
+Bug Fixes
+---------
+* Race when adding a pool while setting keyspace (PYTHON-628)
+* Update results_metadata when prepared statement is reprepared (PYTHON-621)
+* CQL Export for Thrift Tables (PYTHON-213)
+* cqlengine: default value not applied to UserDefinedType (PYTHON-606)
+* cqlengine: columns are no longer hashable (PYTHON-618)
+* cqlengine: remove clustering keys from where clause when deleting only static columns (PYTHON-608)
+
+3.6.0
+=====
+August 1, 2016
+
+Features
+--------
+* Handle null values in NumpyProtocolHandler (PYTHON-553)
+* Collect greplin scales stats per cluster (PYTHON-561)
+* Update mock unit test dependency requirement (PYTHON-591)
+* Handle Missing CompositeType metadata following C* upgrade (PYTHON-562)
+* Improve Host.is_up state for HostDistance.IGNORED hosts (PYTHON-551)
+* Utilize v2 protocol's ability to skip result set metadata for prepared statement execution (PYTHON-71)
+* Return from Cluster.connect() when first contact point connection(pool) is opened (PYTHON-105)
+* cqlengine: Add ContextQuery to allow cqlengine models to switch the keyspace context easily (PYTHON-598)
+* Standardize Validation between Ascii and Text types in Cqlengine (PYTHON-609)
+
+Bug Fixes
+---------
+* Fix geventreactor with SSL support (PYTHON-600)
+* Don't downgrade protocol version if explicitly set (PYTHON-537)
+* Nonexistent contact point tries to connect indefinitely (PYTHON-549)
+* Execute_concurrent can exceed max recursion depth in failure mode (PYTHON-585)
+* Libev loop shutdown race (PYTHON-578)
+* Include aliases in DCT type string (PYTHON-579)
+* cqlengine: Comparison operators for Columns (PYTHON-595)
+* cqlengine: disentangle default_time_to_live table option from model query default TTL (PYTHON-538)
+* cqlengine: pk__token column name issue with the equality operator (PYTHON-584)
+* cqlengine: Fix "__in" filtering operator converts True to string "True" automatically (PYTHON-596)
+* cqlengine: Avoid LWTExceptions when updating columns that are part of the condition (PYTHON-580)
+* cqlengine: Cannot execute a query when the filter contains all columns (PYTHON-599)
+* cqlengine: routing key computation issue when a primary key column is overriden by model inheritance (PYTHON-576)
+
+3.5.0
+=====
+June 27, 2016
+
+Features
+--------
+* Optional Execution Profiles for the core driver (PYTHON-569)
+* API to get the host metadata associated with the control connection node (PYTHON-583)
+* Expose CDC option in table metadata CQL (PYTHON-593)
+
+Bug Fixes
+---------
+* Clean up Asyncore socket map when fork is detected (PYTHON-577)
+* cqlengine: QuerySet only() is not respected when there are deferred fields (PYTHON-560)
+
+3.4.1
+=====
+May 26, 2016
+
+Bug Fixes
+---------
+* Gevent connection closes on IO timeout (PYTHON-573)
+* "dictionary changed size during iteration" with Python 3 (PYTHON-572)
+
+3.4.0
+=====
+May 24, 2016
+
+Features
+--------
+*  Include DSE version and workload in Host data (PYTHON-555)
+*  Add a context manager to Cluster and Session (PYTHON-521)
+*  Better Error Message for Unsupported Protocol Version (PYTHON-157)
+*  Make the error message explicitly state when an error comes from the server (PYTHON-412)
+*  Short Circuit meta refresh on topo change if NEW_NODE already exists (PYTHON-557)
+*  Show warning when the wrong config is passed to SimpleStatement (PYTHON-219)
+*  Return namedtuple result pairs from execute_concurrent (PYTHON-362)
+*  BatchStatement should enforce batch size limit in a better way (PYTHON-151)
+*  Validate min/max request thresholds for connection pool scaling (PYTHON-220)
+*  Handle or warn about multiple hosts with the same rpc_address (PYTHON-365)
+*  Write docs around working with datetime and timezones (PYTHON-394)
+
+Bug Fixes
+---------
+*  High CPU utilization when using asyncore event loop (PYTHON-239)
+*  Fix CQL Export for non-ASCII Identifiers (PYTHON-447)
+*  Make stress scripts Python 2.6 compatible (PYTHON-434)
+*  UnicodeDecodeError when unicode characters in key in BOP (PYTHON-559)
+*  WhiteListRoundRobinPolicy should resolve hosts (PYTHON-565)
+*  Cluster and Session do not GC after leaving scope (PYTHON-135)
+*  Don't wait for schema agreement on ignored nodes (PYTHON-531)
+*  Reprepare on_up with many clients causes node overload (PYTHON-556)
+*  None inserted into host map when control connection node is decommissioned (PYTHON-548)
+*  weakref.ref does not accept keyword arguments (github #585)
+
+3.3.0
+=====
+May 2, 2016
+
+Features
+--------
+* Add an AddressTranslator interface (PYTHON-69)
+* New Retry Policy Decision - try next host (PYTHON-285)
+* Don't mark host down on timeout (PYTHON-286)
+* SSL hostname verification (PYTHON-296)
+* Add C* version to metadata or cluster objects (PYTHON-301)
+* Options to Disable Schema, Token Metadata Processing (PYTHON-327)
+* Expose listen_address of node we get ring information from (PYTHON-332)
+* Use A-record with multiple IPs for contact points (PYTHON-415)
+* Custom consistency level for populating query traces (PYTHON-435)
+* Normalize Server Exception Types (PYTHON-443)
+* Propagate exception message when DDL schema agreement fails (PYTHON-444)
+* Specialized exceptions for metadata refresh methods failure (PYTHON-527)
+
+Bug Fixes
+---------
+* Resolve contact point hostnames to avoid duplicate hosts (PYTHON-103)
+* GeventConnection stalls requests when read is a multiple of the input buffer size (PYTHON-429)
+* named_tuple_factory breaks with duplicate "cleaned" col names (PYTHON-467)
+* Connection leak if Cluster.shutdown() happens during reconnection (PYTHON-482)
+* HostConnection.borrow_connection does not block when all request ids are used (PYTHON-514)
+* Empty field not being handled by the NumpyProtocolHandler (PYTHON-550)
+
+3.2.2
+=====
+April 19, 2016
+
+* Fix counter save-after-no-update (PYTHON-547)
+
+3.2.1
+=====
+April 13, 2016
+
+* Introduced an update to allow deserializer compilation with recently released Cython 0.24 (PYTHON-542)
+
+3.2.0
+=====
+April 12, 2016
+
+Features
+--------
+* cqlengine: Warn on sync_schema type mismatch (PYTHON-260)
+* cqlengine: Automatically defer fields with the '=' operator (and immutable values) in select queries (PYTHON-520)
+* cqlengine: support non-equal conditions for LWT (PYTHON-528)
+* cqlengine: sync_table should validate the primary key composition (PYTHON-532)
+* cqlengine: token-aware routing for mapper statements (PYTHON-535)
+
+Bug Fixes
+---------
+* Deleting a column in a lightweight transaction raises a SyntaxException #325 (PYTHON-249)
+* cqlengine: make Token function works with named tables/columns #86 (PYTHON-272)
+* comparing models with datetime fields fail #79 (PYTHON-273)
+* cython date deserializer integer math should be aligned with CPython (PYTHON-480)
+* db_field is not always respected with UpdateStatement (PYTHON-530)
+* Sync_table fails on column.Set with secondary index (PYTHON-533)
+
+3.1.1
+=====
+March 14, 2016
+
+Bug Fixes
+---------
+* cqlengine: Fix performance issue related to additional "COUNT" queries (PYTHON-522)
+
+3.1.0
+=====
+March 10, 2016
+
+Features
+--------
+* Pass name of server auth class to AuthProvider (PYTHON-454)
+* Surface schema agreed flag for DDL statements (PYTHON-458)
+* Automatically convert float and int to Decimal on serialization (PYTHON-468)
+* Eventlet Reactor IO improvement (PYTHON-495)
+* Make pure Python ProtocolHandler available even when Cython is present (PYTHON-501)
+* Optional Cython deserializer for bytes as bytearray (PYTHON-503)
+* Add Session.default_serial_consistency_level (github #510)
+* cqlengine: Expose prior state information via cqlengine LWTException (github #343, PYTHON-336)
+* cqlengine: Collection datatype "contains" operators support (Cassandra 2.1) #278 (PYTHON-258)
+* cqlengine: Add DISTINCT query operator (PYTHON-266)
+* cqlengine: Tuple cqlengine api (PYTHON-306)
+* cqlengine: Add support for UPDATE/DELETE ... IF EXISTS statements (PYTHON-432)
+* cqlengine: Allow nested container types (PYTHON-478)
+* cqlengine: Add ability to set query's fetch_size and limit (PYTHON-323)
+* cqlengine: Internalize default keyspace from successive set_session (PYTHON-486)
+* cqlengine: Warn when Model.create() on Counters (to be deprecated) (PYTHON-333)
+
+Bug Fixes
+---------
+* Bus error (alignment issues) when running cython on some ARM platforms (PYTHON-450)
+* Overflow when decoding large collections (cython) (PYTHON-459)
+* Timer heap comparison issue with Python 3 (github #466)
+* Cython deserializer date overflow at 2^31 - 1 (PYTHON-452)
+* Decode error encountered when cython deserializing large map results (PYTHON-459)
+* Don't require Cython for build if compiler or Python header not present (PYTHON-471)
+* Unorderable types in task scheduling with Python 3 (h(PYTHON-473)
+* cqlengine: Fix crash when updating a UDT column with a None value (github #467)
+* cqlengine: Race condition in ..connection.execute with lazy_connect (PYTHON-310)
+* cqlengine: doesn't support case sensitive column family names (PYTHON-337)
+* cqlengine: UserDefinedType mandatory in create or update (PYTHON-344)
+* cqlengine: db_field breaks UserType (PYTHON-346)
+* cqlengine: UDT badly quoted (PYTHON-347)
+* cqlengine: Use of db_field on primary key prevents querying except while tracing. (PYTHON-351)
+* cqlengine: DateType.deserialize being called with one argument vs two (PYTHON-354)
+* cqlengine: Querying without setting up connection now throws AttributeError and not CQLEngineException (PYTHON-395)
+* cqlengine: BatchQuery multiple time executing execute statements. (PYTHON-445)
+* cqlengine: Better error for management functions when no connection set (PYTHON-451)
+* cqlengine: Handle None values for UDT attributes in cqlengine (PYTHON-470)
+* cqlengine: Fix inserting None for model save (PYTHON-475)
+* cqlengine: EQ doesn't map to a QueryOperator (setup race condition) (PYTHON-476)
+* cqlengine: class.MultipleObjectsReturned has DoesNotExist as base class (PYTHON-489)
+* cqlengine: Typo in cqlengine UserType __len__ breaks attribute assignment (PYTHON-502)
+
+
+Other
+-----
+
+* cqlengine: a major improvement on queryset has been introduced. It
+  is a lot more efficient to iterate large datasets: the rows are
+  now fetched on demand using the driver pagination.
+
+* cqlengine: the queryset len() and count() behaviors have changed. It
+  now executes a "SELECT COUNT(*)" of the query rather than returning
+  the size of the internal result_cache (loaded rows). On large
+  queryset, you might want to avoid using them due to the performance
+  cost. Note that trying to access objects using list index/slicing
+  with negative indices also requires a count to be
+  executed.
+
+
+
+3.0.0
+=====
+November 24, 2015
+
+Features
+--------
+* Support datetime.date objects as a DateType (PYTHON-212)
+* Add Cluster.update_view_metadata (PYTHON-407)
+* QueryTrace option to populate partial trace sessions (PYTHON-438)
+* Attach column names to ResultSet (PYTHON-439)
+* Change default consistency level to LOCAL_ONE
+
+Bug Fixes
+---------
+* Properly SerDes nested collections when protocol_version < 3 (PYTHON-215)
+* Evict UDTs from UserType cache on change (PYTHON-226)
+* Make sure query strings are always encoded UTF-8 (PYTHON-334)
+* Track previous value of columns at instantiation in CQLengine (PYTHON-348)
+* UDT CQL encoding does not work for unicode values (PYTHON-353)
+* NetworkTopologyStrategy#make_token_replica_map does not account for multiple racks in a DC (PYTHON-378)
+* Cython integer overflow on decimal type deserialization (PYTHON-433)
+* Query trace: if session hasn't been logged, query trace can throw exception (PYTHON-442)
+
+3.0.0rc1
+========
+November 9, 2015
+
+Features
+--------
+* Process Modernized Schema Tables for Cassandra 3.0 (PYTHON-276, PYTHON-408, PYTHON-400, PYTHON-422)
+* Remove deprecated features (PYTHON-292)
+* Don't assign trace data to Statements (PYTHON-318)
+* Normalize results return (PYTHON-368)
+* Process Materialized View Metadata/Events (PYTHON-371)
+* Remove blist as soft dependency (PYTHON-385)
+* Change default consistency level to LOCAL_QUORUM (PYTHON-416)
+* Normalize CQL query/export in metadata model (PYTHON-405)
+
+Bug Fixes
+---------
+* Implementation of named arguments bind is non-pythonic (PYTHON-178)
+* CQL encoding is incorrect for NaN and Infinity floats (PYTHON-282)
+* Protocol downgrade issue with C* 2.0.x, 2.1.x, and python3, with non-default logging (PYTHON-409)
+* ValueError when accessing usertype with non-alphanumeric field names (PYTHON-413)
+* NumpyProtocolHandler does not play well with PagedResult (PYTHON-430)
+
+2.7.2
+=====
+September 14, 2015
+
+Bug Fixes
+---------
+* Resolve CQL export error for UDF with zero parameters (PYTHON-392)
+* Remove futures dep. for Python 3 (PYTHON-393)
+* Avoid Python closure in cdef (supports earlier Cython compiler) (PYTHON-396)
+* Unit test runtime issues (PYTHON-397,398)
+
+2.7.1
+=====
+August 25, 2015
+
+Bug Fixes
+---------
+* Explicitly include extension source files in Manifest
+
+2.7.0
+=====
+August 25, 2015
+
+Cython is introduced, providing compiled extensions for core modules, and
+extensions for optimized results deserialization.
+
+Features
+--------
+* General Performance Improvements for Throughput (PYTHON-283)
+* Improve synchronous request performance with Timers (PYTHON-108)
+* Enable C Extensions for PyPy Runtime (PYTHON-357)
+* Refactor SerDes functionality for pluggable interface (PYTHON-313)
+* Cython SerDes Extension (PYTHON-377)
+* Accept iterators/generators for execute_concurrent() (PYTHON-123)
+* cythonize existing modules (PYTHON-342)
+* Pure Python murmur3 implementation (PYTHON-363)
+* Make driver tolerant of inconsistent metadata (PYTHON-370)
+
+Bug Fixes
+---------
+* Drop Events out-of-order Cause KeyError on Processing (PYTHON-358)
+* DowngradingConsistencyRetryPolicy doesn't check response count on write timeouts (PYTHON-338)
+* Blocking connect does not use connect_timeout (PYTHON-381)
+* Properly protect partition key in CQL export (PYTHON-375)
+* Trigger error callbacks on timeout (PYTHON-294)
+
+2.6.0
+=====
+July 20, 2015
+
+Bug Fixes
+---------
+* Output proper CQL for compact tables with no clustering columns (PYTHON-360)
+
+2.6.0c2
+=======
+June 24, 2015
+
+Features
+--------
+* Automatic Protocol Version Downgrade (PYTHON-240)
+* cqlengine Python 2.6 compatibility (PYTHON-288)
+* Double-dollar string quote UDF body (PYTHON-345)
+* Set models.DEFAULT_KEYSPACE when calling set_session (github #352)
+
+Bug Fixes
+---------
+* Avoid stall while connecting to mixed version cluster (PYTHON-303)
+* Make SSL work with AsyncoreConnection in python 2.6.9 (PYTHON-322)
+* Fix Murmur3Token.from_key() on Windows (PYTHON-331)
+* Fix cqlengine TimeUUID rounding error for Windows (PYTHON-341)
+* Avoid invalid compaction options in CQL export for non-SizeTiered (PYTHON-352)
+
+2.6.0c1
+=======
+June 4, 2015
+
+This release adds support for Cassandra 2.2 features, including version
+4 of the native protocol.
+
+Features
+--------
+* Default load balancing policy to TokenAware(DCAware) (PYTHON-160)
+* Configuration option for connection timeout (PYTHON-206)
+* Support User Defined Function and Aggregate metadata in C* 2.2 (PYTHON-211)
+* Surface request client in QueryTrace for C* 2.2+ (PYTHON-235)
+* Implement new request failure messages in protocol v4+ (PYTHON-238)
+* Metadata model now maps index meta by index name (PYTHON-241)
+* Support new types in C* 2.2: date, time, smallint, tinyint (PYTHON-245, 295)
+* cqle: add Double column type and remove Float overload (PYTHON-246)
+* Use partition key column information in prepared response for protocol v4+ (PYTHON-277)
+* Support message custom payloads in protocol v4+ (PYTHON-280, PYTHON-329)
+* Deprecate refresh_schema and replace with functions for specific entities (PYTHON-291)
+* Save trace id even when trace complete times out (PYTHON-302)
+* Warn when registering client UDT class for protocol < v3 (PYTHON-305)
+* Support client warnings returned with messages in protocol v4+ (PYTHON-315)
+* Ability to distinguish between NULL and UNSET values in protocol v4+ (PYTHON-317)
+* Expose CQL keywords in API (PYTHON-324)
+
+Bug Fixes
+---------
+* IPv6 address support on Windows (PYTHON-20)
+* Convert exceptions during automatic re-preparation to nice exceptions (PYTHON-207)
+* cqle: Quote keywords properly in table management functions (PYTHON-244)
+* Don't default to GeventConnection when gevent is loaded, but not monkey-patched (PYTHON-289)
+* Pass dynamic host from SaslAuthProvider to SaslAuthenticator (PYTHON-300)
+* Make protocol read_inet work for Windows (PYTHON-309)
+* cqle: Correct encoding for nested types (PYTHON-311)
+* Update list of CQL keywords used quoting identifiers (PYTHON-319)
+* Make ConstantReconnectionPolicy work with infinite retries (github #327, PYTHON-325)
+* Accept UUIDs with uppercase hex as valid in cqlengine (github #335)
+
 2.5.1
 =====
 April 23, 2015
@@ -88,7 +671,6 @@ Bug Fixes
 ---------
 * Make execute_concurrent compatible with Python 2.6 (PYTHON-159)
 * Handle Unauthorized message on schema_triggers query (PYTHON-155)
-* Make execute_concurrent compatible with Python 2.6 (github-197)
 * Pure Python sorted set in support of UDTs nested in collections (PYTON-167)
 * Support CUSTOM index metadata and string export (PYTHON-165)
 

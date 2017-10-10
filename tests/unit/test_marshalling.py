@@ -1,4 +1,4 @@
-# Copyright 2013-2015 DataStax, Inc.
+# Copyright 2013-2017 DataStax, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,7 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from cassandra.marshal import bitlength
+import sys
+
+from cassandra import ProtocolVersion
 
 try:
     import unittest2 as unittest
@@ -23,8 +25,8 @@ from datetime import datetime, date
 from decimal import Decimal
 from uuid import UUID
 
-from cassandra.cqltypes import lookup_casstype, DecimalType, UTF8Type
-from cassandra.util import OrderedMap, OrderedMapSerializedKey, sortedset, Time, Date
+from cassandra.cqltypes import lookup_casstype, DecimalType, UTF8Type, DateType
+from cassandra.util import OrderedMapSerializedKey, sortedset, Time, Date
 
 marshalled_value_pairs = (
     # binary form, type, python native type
@@ -39,6 +41,7 @@ marshalled_value_pairs = (
     (b'\x80\x00\x00\x00\x00\x00\x00\x00', 'CounterColumnType', -9223372036854775808),
     (b'', 'CounterColumnType', None),
     (b'\x00\x00\x013\x7fb\xeey', 'DateType', datetime(2011, 11, 7, 18, 55, 49, 881000)),
+    (b'\x00\x00\x01P\xc5~L\x00', 'DateType', datetime(2015, 11, 2)),
     (b'', 'DateType', None),
     (b'\x00\x00\x00\r\nJ\x04"^\x91\x04\x8a\xb1\x18\xfe', 'DecimalType', Decimal('1243878957943.1234124191998')),
     (b'\x00\x00\x00\x06\xe5\xde]\x98Y', 'DecimalType', Decimal('-112233.441191')),
@@ -81,7 +84,11 @@ marshalled_value_pairs = (
     (b'\x00\x01\x00\x10\xafYC\xa3\xea<\x11\xe1\xabc\xc4,\x03"y\xf0', 'ListType(TimeUUIDType)', [UUID(bytes=b'\xafYC\xa3\xea<\x11\xe1\xabc\xc4,\x03"y\xf0')]),
     (b'\x80\x00\x00\x01', 'SimpleDateType', Date(1)),
     (b'\x7f\xff\xff\xff', 'SimpleDateType', Date('1969-12-31')),
-    (b'\x00\x00\x00\x00\x00\x00\x00\x01', 'TimeType', Time(1))
+    (b'\x00\x00\x00\x00\x00\x00\x00\x01', 'TimeType', Time(1)),
+    (b'\x7f', 'ByteType', 127),
+    (b'\x80', 'ByteType', -128),
+    (b'\x7f\xff', 'ShortType', 32767),
+    (b'\x80\x00', 'ShortType', -32768)
 )
 
 ordered_map_value = OrderedMapSerializedKey(UTF8Type, 2)
@@ -126,7 +133,16 @@ class UnmarshalTest(unittest.TestCase):
                              msg='Marshaller for %s (%s) gave wrong type (%s instead of %s)'
                                  % (valtype, marshaller, type(whatwegot), type(serializedval)))
 
-    def test_bitlength(self):
-        self.assertEqual(bitlength(9), 4)
-        self.assertEqual(bitlength(-10), 0)
-        self.assertEqual(bitlength(0), 0)
+    def test_date(self):
+        # separate test because it will deserialize as datetime
+        self.assertEqual(DateType.from_binary(DateType.to_binary(date(2015, 11, 2), 1), 1), datetime(2015, 11, 2))
+
+    def test_decimal(self):
+        # testing implicit numeric conversion
+        # int, tuple(sign, digits, exp), float
+        converted_types = (10001, (0, (1, 0, 0, 0, 0, 1), -3), 100.1, -87.629798)
+
+        for proto_ver in range(1, ProtocolVersion.MAX_SUPPORTED + 1):
+            for n in converted_types:
+                expected = Decimal(n)
+                self.assertEqual(DecimalType.from_binary(DecimalType.to_binary(n, proto_ver), proto_ver), expected)

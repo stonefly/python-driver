@@ -1,4 +1,4 @@
-# Copyright 2013-2015 DataStax, Inc.
+# Copyright 2013-2017 DataStax, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,7 +18,7 @@ except ImportError:
     import unittest # noqa
 
 from mock import Mock, NonCallableMagicMock
-from threading import Thread, Event
+from threading import Thread, Event, Lock
 
 from cassandra.cluster import Session
 from cassandra.connection import Connection
@@ -74,7 +74,7 @@ class HostConnectionPoolTests(unittest.TestCase):
     def test_successful_wait_for_connection(self):
         host = Mock(spec=Host, address='ip1')
         session = self.make_session()
-        conn = NonCallableMagicMock(spec=Connection, in_flight=0, is_defunct=False, is_closed=False, max_request_id=100)
+        conn = NonCallableMagicMock(spec=Connection, in_flight=0, is_defunct=False, is_closed=False, max_request_id=100, lock=Lock())
         session.cluster.connection_factory.return_value = conn
 
         pool = HostConnectionPool(host, HostDistance.LOCAL, session)
@@ -98,7 +98,7 @@ class HostConnectionPoolTests(unittest.TestCase):
     def test_all_connections_trashed(self):
         host = Mock(spec=Host, address='ip1')
         session = self.make_session()
-        conn = NonCallableMagicMock(spec=Connection, in_flight=0, is_defunct=False, is_closed=False, max_request_id=100)
+        conn = NonCallableMagicMock(spec=Connection, in_flight=0, is_defunct=False, is_closed=False, max_request_id=100, lock=Lock())
         session.cluster.connection_factory.return_value = conn
         session.cluster.get_core_connections_per_host.return_value = 1
 
@@ -165,7 +165,8 @@ class HostConnectionPoolTests(unittest.TestCase):
     def test_return_defunct_connection(self):
         host = Mock(spec=Host, address='ip1')
         session = self.make_session()
-        conn = NonCallableMagicMock(spec=Connection, in_flight=0, is_defunct=False, is_closed=False, max_request_id=100)
+        conn = NonCallableMagicMock(spec=Connection, in_flight=0, is_defunct=False, is_closed=False,
+                                    max_request_id=100, signaled_error=False)
         session.cluster.connection_factory.return_value = conn
 
         pool = HostConnectionPool(host, HostDistance.LOCAL, session)
@@ -177,14 +178,14 @@ class HostConnectionPoolTests(unittest.TestCase):
         pool.return_connection(conn)
 
         # the connection should be closed a new creation scheduled
-        conn.close.assert_called_once()
-        session.submit.assert_called_once()
+        self.assertTrue(session.submit.call_args)
         self.assertFalse(pool.is_shutdown)
 
     def test_return_defunct_connection_on_down_host(self):
         host = Mock(spec=Host, address='ip1')
         session = self.make_session()
-        conn = NonCallableMagicMock(spec=Connection, in_flight=0, is_defunct=False, is_closed=False, max_request_id=100)
+        conn = NonCallableMagicMock(spec=Connection, in_flight=0, is_defunct=False, is_closed=False,
+                                    max_request_id=100, signaled_error=False)
         session.cluster.connection_factory.return_value = conn
 
         pool = HostConnectionPool(host, HostDistance.LOCAL, session)
@@ -196,15 +197,15 @@ class HostConnectionPoolTests(unittest.TestCase):
         pool.return_connection(conn)
 
         # the connection should be closed a new creation scheduled
-        session.cluster.signal_connection_failure.assert_called_once()
-        conn.close.assert_called_once()
+        self.assertTrue(session.cluster.signal_connection_failure.call_args)
+        self.assertTrue(conn.close.call_args)
         self.assertFalse(session.submit.called)
         self.assertTrue(pool.is_shutdown)
 
     def test_return_closed_connection(self):
         host = Mock(spec=Host, address='ip1')
         session = self.make_session()
-        conn = NonCallableMagicMock(spec=Connection, in_flight=0, is_defunct=False, is_closed=True, max_request_id=100)
+        conn = NonCallableMagicMock(spec=Connection, in_flight=0, is_defunct=False, is_closed=True, max_request_id=100, signaled_error=False)
         session.cluster.connection_factory.return_value = conn
 
         pool = HostConnectionPool(host, HostDistance.LOCAL, session)
@@ -216,7 +217,7 @@ class HostConnectionPoolTests(unittest.TestCase):
         pool.return_connection(conn)
 
         # a new creation should be scheduled
-        session.submit.assert_called_once()
+        self.assertTrue(session.submit.call_args)
         self.assertFalse(pool.is_shutdown)
 
     def test_host_instantiations(self):

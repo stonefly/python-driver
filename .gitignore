@@ -4,6 +4,7 @@
 *.so
 *.egg
 *.egg-info
+*.attr
 .tox
 .python-version
 build
@@ -16,6 +17,11 @@ docs/_build/
 tests/integration/ccm
 setuptools*.tar.gz
 setuptools*.egg
+
+cassandra/*.c
+!cassandra/cmurmur3.c
+cassandra/*.html
+tests/unit/cython/bytesio_testhelper.c
 
 # OSX
 .DS_Store
@@ -35,3 +41,4 @@ setuptools*.egg
 
 #iPython
 *.ipynb
+

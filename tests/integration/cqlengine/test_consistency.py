@@ -1,4 +1,4 @@
-# Copyright 2015 DataStax, Inc.
+# Copyright 2013-2017 DataStax, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,8 +15,10 @@
 import mock
 from uuid import uuid4
 
-from cassandra import ConsistencyLevel as CL
+from cassandra import ConsistencyLevel as CL, ConsistencyLevel
+from cassandra.cluster import Session
 from cassandra.cqlengine import columns
+from cassandra.cqlengine import connection
 from cassandra.cqlengine.management import sync_table, drop_table
 from cassandra.cqlengine.models import Model
 from cassandra.cqlengine.query import BatchQuery
@@ -66,7 +68,6 @@ class TestConsistency(BaseConsistencyTest):
         args = m.call_args
         self.assertEqual(CL.ALL, args[0][0].consistency_level)
 
-
     def test_batch_consistency(self):
 
         with mock.patch.object(self.session, 'execute') as m:
@@ -95,7 +96,6 @@ class TestConsistency(BaseConsistencyTest):
         args = m.call_args
         self.assertEqual(CL.ALL, args[0][0].consistency_level)
 
-
     def test_delete(self):
         # ensures we always carry consistency through on delete statements
         t = TestConsistencyModel.create(text="bacon and eggs")
@@ -110,3 +110,12 @@ class TestConsistency(BaseConsistencyTest):
 
         args = m.call_args
         self.assertEqual(CL.ALL, args[0][0].consistency_level)
+
+    def test_default_consistency(self):
+        # verify global assumed default
+        self.assertEqual(Session._default_consistency_level, ConsistencyLevel.LOCAL_ONE)
+
+        # verify that this session default is set according to connection.setup
+        # assumes tests/cqlengine/__init__ setup uses CL.ONE
+        session = connection.get_session()
+        self.assertEqual(session.default_consistency_level, ConsistencyLevel.ONE)

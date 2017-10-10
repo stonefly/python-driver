@@ -1,8 +1,7 @@
 -r requirements.txt
-blist
 scales
 nose
-mock
+mock!=1.1.*
 ccm>=2.0
 unittest2
 PyYAML
@@ -10,3 +9,7 @@ pytz
 sure
 pure-sasl
 twisted
+gevent>=1.0
+eventlet
+cython>=0.20,<0.28
+packaging

@@ -1,4 +1,4 @@
-# Copyright 2013-2015 DataStax, Inc.
+# Copyright 2013-2017 DataStax, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,12 +20,12 @@ except ImportError:
 from concurrent.futures import ThreadPoolExecutor
 from mock import Mock, ANY, call
 
-from cassandra import OperationTimedOut
+from cassandra import OperationTimedOut, SchemaTargetType, SchemaChangeType
 from cassandra.protocol import ResultMessage, RESULT_KIND_ROWS
-from cassandra.cluster import ControlConnection, _Scheduler
+from cassandra.cluster import ControlConnection, _Scheduler, ProfileManager, EXEC_PROFILE_DEFAULT, ExecutionProfile
 from cassandra.pool import Host
 from cassandra.policies import (SimpleConvictionPolicy, RoundRobinPolicy,
-                                ConstantReconnectionPolicy)
+                                ConstantReconnectionPolicy, IdentityTranslator)
 
 PEER_IP = "foobar"
 
@@ -59,8 +59,9 @@ class MockMetadata(object):
 class MockCluster(object):
 
     max_schema_agreement_wait = 5
-    load_balancing_policy = RoundRobinPolicy()
+    profile_manager = ProfileManager()
     reconnection_policy = ConstantReconnectionPolicy(2)
+    address_translator = IdentityTranslator()
     down_host = None
     contact_points = []
     is_shutdown = False
@@ -71,6 +72,7 @@ class MockCluster(object):
         self.removed_hosts = []
         self.scheduler = Mock(spec=_Scheduler)
         self.executor = Mock(spec=ThreadPoolExecutor)
+        self.profile_manager.profiles[EXEC_PROFILE_DEFAULT] = ExecutionProfile(RoundRobinPolicy())
 
     def add_host(self, address, datacenter, rack, signal=False, refresh_nodes=True):
         host = Host(address, SimpleConvictionPolicy, datacenter, rack)
@@ -94,8 +96,8 @@ class MockConnection(object):
     def __init__(self):
         self.host = "192.168.1.0"
         self.local_results = [
-            ["schema_version", "cluster_name", "data_center", "rack", "partitioner", "tokens"],
-            [["a", "foocluster", "dc1", "rack1", "Murmur3Partitioner", ["0", "100", "200"]]]
+            ["schema_version", "cluster_name", "data_center", "rack", "partitioner", "release_version", "tokens"],
+            [["a", "foocluster", "dc1", "rack1", "Murmur3Partitioner", "2.2.0", ["0", "100", "200"]]]
         ]
 
         self.peer_results = [
@@ -130,14 +132,14 @@ class ControlConnectionTest(unittest.TestCase):
         self.connection = MockConnection()
         self.time = FakeTime()
 
-        self.control_connection = ControlConnection(self.cluster, 1, 0, 0)
+        self.control_connection = ControlConnection(self.cluster, 1, 0, 0, 0)
         self.control_connection._connection = self.connection
         self.control_connection._time = self.time
 
     def _get_matching_schema_preloaded_results(self):
         local_results = [
-            ["schema_version", "cluster_name", "data_center", "rack", "partitioner", "tokens"],
-            [["a", "foocluster", "dc1", "rack1", "Murmur3Partitioner", ["0", "100", "200"]]]
+            ["schema_version", "cluster_name", "data_center", "rack", "partitioner", "release_version", "tokens"],
+            [["a", "foocluster", "dc1", "rack1", "Murmur3Partitioner", "2.2.0", ["0", "100", "200"]]]
         ]
         local_response = ResultMessage(kind=RESULT_KIND_ROWS, results=local_results)
 
@@ -152,8 +154,8 @@ class ControlConnectionTest(unittest.TestCase):
 
     def _get_nonmatching_schema_preloaded_results(self):
         local_results = [
-            ["schema_version", "cluster_name", "data_center", "rack", "partitioner", "tokens"],
-            [["a", "foocluster", "dc1", "rack1", "Murmur3Partitioner", ["0", "100", "200"]]]
+            ["schema_version", "cluster_name", "data_center", "rack", "partitioner", "release_version", "tokens"],
+            [["a", "foocluster", "dc1", "rack1", "Murmur3Partitioner", "2.2.0", ["0", "100", "200"]]]
         ]
         local_response = ResultMessage(kind=RESULT_KIND_ROWS, results=local_results)
 
@@ -346,7 +348,7 @@ class ControlConnectionTest(unittest.TestCase):
         }
         self.cluster.scheduler.reset_mock()
         self.control_connection._handle_topology_change(event)
-        self.cluster.scheduler.schedule_unique.assert_called_once_with(ANY, self.control_connection.refresh_node_list_and_token_map)
+        self.cluster.scheduler.schedule_unique.assert_called_once_with(ANY, self.control_connection._refresh_nodes_if_not_up, '1.2.3.4')
 
         event = {
             'change_type': 'REMOVED_NODE',
@@ -362,7 +364,7 @@ class ControlConnectionTest(unittest.TestCase):
         }
         self.cluster.scheduler.reset_mock()
         self.control_connection._handle_topology_change(event)
-        self.cluster.scheduler.schedule_unique.assert_called_once_with(ANY, self.control_connection.refresh_node_list_and_token_map)
+        self.cluster.scheduler.schedule_unique.assert_called_once_with(ANY, self.control_connection._refresh_nodes_if_not_up, '1.2.3.4')
 
     def test_handle_status_change(self):
         event = {
@@ -402,26 +404,30 @@ class ControlConnectionTest(unittest.TestCase):
 
     def test_handle_schema_change(self):
 
-        for change_type in ('CREATED', 'DROPPED', 'UPDATED'):
+        change_types = [getattr(SchemaChangeType, attr) for attr in vars(SchemaChangeType) if attr[0] != '_']
+        for change_type in change_types:
             event = {
+                'target_type': SchemaTargetType.TABLE,
                 'change_type': change_type,
                 'keyspace': 'ks1',
                 'table': 'table1'
             }
             self.cluster.scheduler.reset_mock()
             self.control_connection._handle_schema_change(event)
-            self.cluster.scheduler.schedule_unique.assert_called_once_with(0.0, self.control_connection.refresh_schema, 'ks1', 'table1', None)
+            self.cluster.scheduler.schedule_unique.assert_called_once_with(ANY, self.control_connection.refresh_schema, **event)
 
             self.cluster.scheduler.reset_mock()
-            event['table'] = None
+            event['target_type'] = SchemaTargetType.KEYSPACE
+            del event['table']
             self.control_connection._handle_schema_change(event)
-            self.cluster.scheduler.schedule_unique.assert_called_once_with(0.0, self.control_connection.refresh_schema, 'ks1', None, None)
+            self.cluster.scheduler.schedule_unique.assert_called_once_with(ANY, self.control_connection.refresh_schema, **event)
 
     def test_refresh_disabled(self):
         cluster = MockCluster()
 
         schema_event = {
-            'change_type': 'CREATED',
+            'target_type': SchemaTargetType.TABLE,
+            'change_type': SchemaChangeType.CREATED,
             'keyspace': 'ks1',
             'table': 'table1'
         }
@@ -436,7 +442,7 @@ class ControlConnectionTest(unittest.TestCase):
             'address': ('1.2.3.4', 9000)
         }
 
-        cc_no_schema_refresh = ControlConnection(cluster, 1, -1, 0)
+        cc_no_schema_refresh = ControlConnection(cluster, 1, -1, 0, 0)
         cluster.scheduler.reset_mock()
 
         # no call on schema refresh
@@ -448,9 +454,9 @@ class ControlConnectionTest(unittest.TestCase):
         cc_no_schema_refresh._handle_status_change(status_event)
         cc_no_schema_refresh._handle_topology_change(topo_event)
         cluster.scheduler.schedule_unique.assert_has_calls([call(ANY, cc_no_schema_refresh.refresh_node_list_and_token_map),
-                                                            call(ANY, cc_no_schema_refresh.refresh_node_list_and_token_map)])
+                                                            call(ANY, cc_no_schema_refresh._refresh_nodes_if_not_up, '1.2.3.4')])
 
-        cc_no_topo_refresh = ControlConnection(cluster, 1, 0, -1)
+        cc_no_topo_refresh = ControlConnection(cluster, 1, 0, -1, 0)
         cluster.scheduler.reset_mock()
 
         # no call on topo refresh
@@ -463,4 +469,42 @@ class ControlConnectionTest(unittest.TestCase):
         cc_no_topo_refresh._handle_schema_change(schema_event)
         cluster.scheduler.schedule_unique.assert_has_calls([call(ANY, cc_no_topo_refresh.refresh_node_list_and_token_map),
                                                             call(0.0, cc_no_topo_refresh.refresh_schema,
-                                                                 schema_event['keyspace'], schema_event['table'], None)])
+                                                                 **schema_event)])
+
+
+class EventTimingTest(unittest.TestCase):
+    """
+    A simple test to validate that event scheduling happens in order
+    Added for PYTHON-358
+    """
+    def setUp(self):
+        self.cluster = MockCluster()
+        self.connection = MockConnection()
+        self.time = FakeTime()
+
+        # Use 2 for the schema_event_refresh_window which is what we would normally default to.
+        self.control_connection = ControlConnection(self.cluster, 1, 2, 0, 0)
+        self.control_connection._connection = self.connection
+        self.control_connection._time = self.time
+
+    def test_event_delay_timing(self):
+        """
+        Submits a wide array of events make sure that each is scheduled to occur in the order they were received
+        """
+        prior_delay = 0
+        for _ in range(100):
+            for change_type in ('CREATED', 'DROPPED', 'UPDATED'):
+                event = {
+                    'change_type': change_type,
+                    'keyspace': '1',
+                    'table': 'table1'
+                }
+                # This is to increment the fake time, we don't actually sleep here.
+                self.time.sleep(.001)
+                self.cluster.scheduler.reset_mock()
+                self.control_connection._handle_schema_change(event)
+                self.cluster.scheduler.mock_calls
+                # Grabs the delay parameter from the scheduler invocation
+                current_delay = self.cluster.scheduler.mock_calls[0][1][0]
+                self.assertLess(prior_delay, current_delay)
+                prior_delay = current_delay

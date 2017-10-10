@@ -1,4 +1,4 @@
-# Copyright 2013-2015 DataStax, Inc.
+# Copyright 2013-2017 DataStax, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,13 +14,11 @@
 
 from itertools import islice, cycle, groupby, repeat
 import logging
-from random import randint
+from random import randint, shuffle
 from threading import Lock
-import six
+import socket
 
-from cassandra import ConsistencyLevel
-
-from six.moves import range
+from cassandra import ConsistencyLevel, OperationTimedOut
 
 log = logging.getLogger(__name__)
 
@@ -152,12 +150,11 @@ class RoundRobinPolicy(LoadBalancingPolicy):
     This load balancing policy is used by default.
     """
     _live_hosts = frozenset(())
+    _position = 0
 
     def populate(self, cluster, hosts):
         self._live_hosts = frozenset(hosts)
-        if len(hosts) <= 1:
-            self._position = 0
-        else:
+        if len(hosts) > 1:
             self._position = randint(0, len(hosts) - 1)
 
     def distance(self, host):
@@ -173,7 +170,7 @@ class RoundRobinPolicy(LoadBalancingPolicy):
         length = len(hosts)
         if length:
             pos %= length
-            return list(islice(cycle(hosts), pos, pos + length))
+            return islice(cycle(hosts), pos, pos + length)
         else:
             return []
 
@@ -235,7 +232,7 @@ class DCAwareRoundRobinPolicy(LoadBalancingPolicy):
             self._dc_live_hosts[dc] = tuple(set(dc_hosts))
 
         if not self.local_dc:
-            self._contact_points = cluster.contact_points
+            self._contact_points = cluster.contact_points_resolved
 
         self._position = randint(0, len(hosts) - 1) if hosts else 0
 
@@ -318,8 +315,10 @@ class TokenAwarePolicy(LoadBalancingPolicy):
     This alters the child policy's behavior so that it first attempts to
     send queries to :attr:`~.HostDistance.LOCAL` replicas (as determined
     by the child policy) based on the :class:`.Statement`'s
-    :attr:`~.Statement.routing_key`.  Once those hosts are exhausted, the
-    remaining hosts in the child policy's query plan will be used.
+    :attr:`~.Statement.routing_key`. If :attr:`.shuffle_replicas` is
+    truthy, these replicas will be yielded in a random order. Once those
+    hosts are exhausted, the remaining hosts in the child policy's query
+    plan will be used in the order provided by the child policy.
 
     If no :attr:`~.Statement.routing_key` is set on the query, the child
     policy's query plan will be used as is.
@@ -327,9 +326,14 @@ class TokenAwarePolicy(LoadBalancingPolicy):
 
     _child_policy = None
     _cluster_metadata = None
+    shuffle_replicas = False
+    """
+    Yield local replicas in a random order.
+    """
 
-    def __init__(self, child_policy):
+    def __init__(self, child_policy, shuffle_replicas=False):
         self._child_policy = child_policy
+        self.shuffle_replicas = shuffle_replicas
 
     def populate(self, cluster, hosts):
         self._cluster_metadata = cluster.metadata
@@ -337,7 +341,7 @@ class TokenAwarePolicy(LoadBalancingPolicy):
 
     def check_supported(self):
         if not self._cluster_metadata.can_support_partitioner():
-            raise Exception(
+            raise RuntimeError(
                 '%s cannot be used with the cluster partitioner (%s) because '
                 'the relevant C extension for this driver was not compiled. '
                 'See the installation instructions for details on building '
@@ -364,6 +368,8 @@ class TokenAwarePolicy(LoadBalancingPolicy):
                     yield host
             else:
                 replicas = self._cluster_metadata.get_replicas(keyspace, routing_key)
+                if self.shuffle_replicas:
+                    shuffle(replicas)
                 for replica in replicas:
                     if replica.is_up and \
                             child.distance(replica) == HostDistance.LOCAL:
@@ -400,16 +406,20 @@ class WhiteListRoundRobinPolicy(RoundRobinPolicy):
     Where connection errors occur when connection
     attempts are made to private IP addresses remotely
     """
+
     def __init__(self, hosts):
         """
         The `hosts` parameter should be a sequence of hosts to permit
         connections to.
         """
         self._allowed_hosts = hosts
+        self._allowed_hosts_resolved = [endpoint[4][0] for a in self._allowed_hosts
+                                        for endpoint in socket.getaddrinfo(a, None, socket.AF_UNSPEC, socket.SOCK_STREAM)]
+
         RoundRobinPolicy.__init__(self)
 
     def populate(self, cluster, hosts):
-        self._live_hosts = frozenset(h for h in hosts if h.address in self._allowed_hosts)
+        self._live_hosts = frozenset(h for h in hosts if h.address in self._allowed_hosts_resolved)
 
         if len(hosts) <= 1:
             self._position = 0
@@ -417,18 +427,130 @@ class WhiteListRoundRobinPolicy(RoundRobinPolicy):
             self._position = randint(0, len(hosts) - 1)
 
     def distance(self, host):
-        if host.address in self._allowed_hosts:
+        if host.address in self._allowed_hosts_resolved:
             return HostDistance.LOCAL
         else:
             return HostDistance.IGNORED
 
     def on_up(self, host):
-        if host.address in self._allowed_hosts:
+        if host.address in self._allowed_hosts_resolved:
             RoundRobinPolicy.on_up(self, host)
 
     def on_add(self, host):
-        if host.address in self._allowed_hosts:
+        if host.address in self._allowed_hosts_resolved:
             RoundRobinPolicy.on_add(self, host)
+
+
+class HostFilterPolicy(LoadBalancingPolicy):
+    """
+    A :class:`.LoadBalancingPolicy` subclass configured with a child policy,
+    and a single-argument predicate. This policy defers to the child policy for
+    hosts where ``predicate(host)`` is truthy. Hosts for which
+    ``predicate(host)`` is falsey will be considered :attr:`.IGNORED`, and will
+    not be used in a query plan.
+
+    This can be used in the cases where you need a whitelist or blacklist
+    policy, e.g. to prepare for decommissioning nodes or for testing:
+
+    .. code-block:: python
+
+        def address_is_ignored(host):
+            return host.address in [ignored_address0, ignored_address1]
+
+        blacklist_filter_policy = HostFilterPolicy(
+            child_policy=RoundRobinPolicy(),
+            predicate=address_is_ignored
+        )
+
+        cluster = Cluster(
+            primary_host,
+            load_balancing_policy=blacklist_filter_policy,
+        )
+
+    See the note in the :meth:`.make_query_plan` documentation for a caveat on
+    how wrapping ordering polices (e.g. :class:`.RoundRobinPolicy`) may break
+    desirable properties of the wrapped policy.
+
+    Please note that whitelist and blacklist policies are not recommended for
+    general, day-to-day use. You probably want something like
+    :class:`.DCAwareRoundRobinPolicy`, which prefers a local DC but has
+    fallbacks, over a brute-force method like whitelisting or blacklisting.
+    """
+
+    def __init__(self, child_policy, predicate):
+        """
+        :param child_policy: an instantiated :class:`.LoadBalancingPolicy`
+                             that this one will defer to.
+        :param predicate: a one-parameter function that takes a :class:`.Host`.
+                          If it returns a falsey value, the :class:`.Host` will
+                          be :attr:`.IGNORED` and not returned in query plans.
+        """
+        super(HostFilterPolicy, self).__init__()
+        self._child_policy = child_policy
+        self._predicate = predicate
+
+    def on_up(self, host, *args, **kwargs):
+        return self._child_policy.on_up(host, *args, **kwargs)
+
+    def on_down(self, host, *args, **kwargs):
+        return self._child_policy.on_down(host, *args, **kwargs)
+
+    def on_add(self, host, *args, **kwargs):
+        return self._child_policy.on_add(host, *args, **kwargs)
+
+    def on_remove(self, host, *args, **kwargs):
+        return self._child_policy.on_remove(host, *args, **kwargs)
+
+    @property
+    def predicate(self):
+        """
+        A predicate, set on object initialization, that takes a :class:`.Host`
+        and returns a value. If the value is falsy, the :class:`.Host` is
+        :class:`~HostDistance.IGNORED`. If the value is truthy,
+        :class:`.HostFilterPolicy` defers to the child policy to determine the
+        host's distance.
+
+        This is a read-only value set in ``__init__``, implemented as a
+        ``property``.
+        """
+        return self._predicate
+
+    def distance(self, host):
+        """
+        Checks if ``predicate(host)``, then returns
+        :attr:`~HostDistance.IGNORED` if falsey, and defers to the child policy
+        otherwise.
+        """
+        if self.predicate(host):
+            return self._child_policy.distance(host)
+        else:
+            return HostDistance.IGNORED
+
+    def populate(self, cluster, hosts):
+        self._child_policy.populate(cluster=cluster, hosts=hosts)
+
+    def make_query_plan(self, working_keyspace=None, query=None):
+        """
+        Defers to the child policy's
+        :meth:`.LoadBalancingPolicy.make_query_plan` and filters the results.
+
+        Note that this filtering may break desirable properties of the wrapped
+        policy in some cases. For instance, imagine if you configure this
+        policy to filter out ``host2``, and to wrap a round-robin policy that
+        rotates through three hosts in the order ``host1, host2, host3``,
+        ``host2, host3, host1``, ``host3, host1, host2``, repeating. This
+        policy will yield ``host1, host3``, ``host3, host1``, ``host3, host1``,
+        disproportionately favoring ``host3``.
+        """
+        child_qp = self._child_policy.make_query_plan(
+            working_keyspace=working_keyspace, query=query
+        )
+        for host in child_qp:
+            if self.predicate(host):
+                yield host
+
+    def check_supported(self):
+        return self._child_policy.check_supported()
 
 
 class ConvictionPolicy(object):
@@ -468,7 +590,7 @@ class SimpleConvictionPolicy(ConvictionPolicy):
     """
 
     def add_failure(self, connection_exc):
-        return True
+        return not isinstance(connection_exc, OperationTimedOut)
 
     def reset(self):
         pass
@@ -509,14 +631,16 @@ class ConstantReconnectionPolicy(ReconnectionPolicy):
         """
         if delay < 0:
             raise ValueError("delay must not be negative")
-        if max_attempts < 0:
+        if max_attempts is not None and max_attempts < 0:
             raise ValueError("max_attempts must not be negative")
 
         self.delay = delay
         self.max_attempts = max_attempts
 
     def new_schedule(self):
-        return repeat(self.delay, self.max_attempts)
+        if self.max_attempts:
+            return repeat(self.delay, self.max_attempts)
+        return repeat(self.delay)
 
 
 class ExponentialReconnectionPolicy(ReconnectionPolicy):
@@ -526,10 +650,17 @@ class ExponentialReconnectionPolicy(ReconnectionPolicy):
     a set maximum delay.
     """
 
-    def __init__(self, base_delay, max_delay):
+    # TODO: max_attempts is 64 to preserve legacy default behavior
+    # consider changing to None in major release to prevent the policy
+    # giving up forever
+    def __init__(self, base_delay, max_delay, max_attempts=64):
         """
         `base_delay` and `max_delay` should be in floating point units of
         seconds.
+
+        `max_attempts` should be a total number of attempts to be made before
+        giving up, or :const:`None` to continue reconnection attempts forever.
+        The default is 64.
         """
         if base_delay < 0 or max_delay < 0:
             raise ValueError("Delays may not be negative")
@@ -537,11 +668,26 @@ class ExponentialReconnectionPolicy(ReconnectionPolicy):
         if max_delay < base_delay:
             raise ValueError("Max delay must be greater than base delay")
 
+        if max_attempts is not None and max_attempts < 0:
+            raise ValueError("max_attempts must not be negative")
+
         self.base_delay = base_delay
         self.max_delay = max_delay
+        self.max_attempts = max_attempts
 
     def new_schedule(self):
-        return (min(self.base_delay * (2 ** i), self.max_delay) for i in range(64))
+        i, overflowed = 0, False
+        while self.max_attempts is None or i < self.max_attempts:
+            if overflowed:
+                yield self.max_delay
+            else:
+                try:
+                    yield min(self.base_delay * (2 ** i), self.max_delay)
+                except OverflowError:
+                    overflowed = True
+                    yield self.max_delay
+
+            i += 1
 
 
 class WriteType(object):
@@ -585,13 +731,28 @@ class WriteType(object):
     A lighweight-transaction write, such as "DELETE ... IF EXISTS".
     """
 
+    VIEW = 6
+    """
+    This WriteType is only seen in results for requests that were unable to
+    complete MV operations.
+    """
+
+    CDC = 7
+    """
+    This WriteType is only seen in results for requests that were unable to
+    complete CDC operations.
+    """
+
+
 WriteType.name_to_value = {
     'SIMPLE': WriteType.SIMPLE,
     'BATCH': WriteType.BATCH,
     'UNLOGGED_BATCH': WriteType.UNLOGGED_BATCH,
     'COUNTER': WriteType.COUNTER,
     'BATCH_LOG': WriteType.BATCH_LOG,
-    'CAS': WriteType.CAS
+    'CAS': WriteType.CAS,
+    'VIEW': WriteType.VIEW,
+    'CDC': WriteType.CDC
 }
 
 
@@ -634,6 +795,12 @@ class RetryPolicy(object):
     should be ignored but no more retries should be attempted.
     """
 
+    RETRY_NEXT_HOST = 3
+    """
+    This should be returned from the below methods if the operation
+    should be retried on another connection.
+    """
+
     def on_read_timeout(self, query, consistency, required_responses,
                         received_responses, data_retrieved, retry_num):
         """
@@ -661,11 +828,11 @@ class RetryPolicy(object):
         a sufficient number of replicas responded (with data digests).
         """
         if retry_num != 0:
-            return (self.RETHROW, None)
+            return self.RETHROW, None
         elif received_responses >= required_responses and not data_retrieved:
-            return (self.RETRY, consistency)
+            return self.RETRY, consistency
         else:
-            return (self.RETHROW, None)
+            return self.RETHROW, None
 
     def on_write_timeout(self, query, consistency, write_type,
                          required_responses, received_responses, retry_num):
@@ -694,11 +861,11 @@ class RetryPolicy(object):
         :attr:`~.WriteType.BATCH_LOG`.
         """
         if retry_num != 0:
-            return (self.RETHROW, None)
+            return self.RETHROW, None
         elif write_type == WriteType.BATCH_LOG:
-            return (self.RETRY, consistency)
+            return self.RETRY, consistency
         else:
-            return (self.RETHROW, None)
+            return self.RETHROW, None
 
     def on_unavailable(self, query, consistency, required_replicas, alive_replicas, retry_num):
         """
@@ -723,7 +890,7 @@ class RetryPolicy(object):
 
         By default, no retries will be attempted and the error will be re-raised.
         """
-        return (self.RETHROW, None)
+        return (self.RETRY_NEXT_HOST, consistency) if retry_num == 0 else (self.RETHROW, None)
 
 
 class FallthroughRetryPolicy(RetryPolicy):
@@ -733,13 +900,13 @@ class FallthroughRetryPolicy(RetryPolicy):
     """
 
     def on_read_timeout(self, *args, **kwargs):
-        return (self.RETHROW, None)
+        return self.RETHROW, None
 
     def on_write_timeout(self, *args, **kwargs):
-        return (self.RETHROW, None)
+        return self.RETHROW, None
 
     def on_unavailable(self, *args, **kwargs):
-        return (self.RETHROW, None)
+        return self.RETHROW, None
 
 
 class DowngradingConsistencyRetryPolicy(RetryPolicy):
@@ -791,40 +958,150 @@ class DowngradingConsistencyRetryPolicy(RetryPolicy):
     """
     def _pick_consistency(self, num_responses):
         if num_responses >= 3:
-            return (self.RETRY, ConsistencyLevel.THREE)
+            return self.RETRY, ConsistencyLevel.THREE
         elif num_responses >= 2:
-            return (self.RETRY, ConsistencyLevel.TWO)
+            return self.RETRY, ConsistencyLevel.TWO
         elif num_responses >= 1:
-            return (self.RETRY, ConsistencyLevel.ONE)
+            return self.RETRY, ConsistencyLevel.ONE
         else:
-            return (self.RETHROW, None)
+            return self.RETHROW, None
 
     def on_read_timeout(self, query, consistency, required_responses,
                         received_responses, data_retrieved, retry_num):
         if retry_num != 0:
-            return (self.RETHROW, None)
+            return self.RETHROW, None
         elif received_responses < required_responses:
             return self._pick_consistency(received_responses)
         elif not data_retrieved:
-            return (self.RETRY, consistency)
+            return self.RETRY, consistency
         else:
-            return (self.RETHROW, None)
+            return self.RETHROW, None
 
     def on_write_timeout(self, query, consistency, write_type,
                          required_responses, received_responses, retry_num):
         if retry_num != 0:
-            return (self.RETHROW, None)
-        elif write_type in (WriteType.SIMPLE, WriteType.BATCH, WriteType.COUNTER):
-            return (self.IGNORE, None)
+            return self.RETHROW, None
+
+        if write_type in (WriteType.SIMPLE, WriteType.BATCH, WriteType.COUNTER):
+            if received_responses > 0:
+                # persisted on at least one replica
+                return self.IGNORE, None
+            else:
+                return self.RETHROW, None
         elif write_type == WriteType.UNLOGGED_BATCH:
             return self._pick_consistency(received_responses)
         elif write_type == WriteType.BATCH_LOG:
-            return (self.RETRY, consistency)
-        else:
-            return (self.RETHROW, None)
+            return self.RETRY, consistency
+
+        return self.RETHROW, None
 
     def on_unavailable(self, query, consistency, required_replicas, alive_replicas, retry_num):
         if retry_num != 0:
-            return (self.RETHROW, None)
+            return self.RETHROW, None
         else:
             return self._pick_consistency(alive_replicas)
+
+
+class AddressTranslator(object):
+    """
+    Interface for translating cluster-defined endpoints.
+
+    The driver discovers nodes using server metadata and topology change events. Normally,
+    the endpoint defined by the server is the right way to connect to a node. In some environments,
+    these addresses may not be reachable, or not preferred (public vs. private IPs in cloud environments,
+    suboptimal routing, etc). This interface allows for translating from server defined endpoints to
+    preferred addresses for driver connections.
+
+    *Note:* :attr:`~Cluster.contact_points` provided while creating the :class:`~.Cluster` instance are not
+    translated using this mechanism -- only addresses received from Cassandra nodes are.
+    """
+    def translate(self, addr):
+        """
+        Accepts the node ip address, and returns a translated address to be used connecting to this node.
+        """
+        raise NotImplementedError()
+
+
+class IdentityTranslator(AddressTranslator):
+    """
+    Returns the endpoint with no translation
+    """
+    def translate(self, addr):
+        return addr
+
+
+class EC2MultiRegionTranslator(AddressTranslator):
+    """
+    Resolves private ips of the hosts in the same datacenter as the client, and public ips of hosts in other datacenters.
+    """
+    def translate(self, addr):
+        """
+        Reverse DNS the public broadcast_address, then lookup that hostname to get the AWS-resolved IP, which
+        will point to the private IP address within the same datacenter.
+        """
+        # get family of this address so we translate to the same
+        family = socket.getaddrinfo(addr, 0, socket.AF_UNSPEC, socket.SOCK_STREAM)[0][0]
+        host = socket.getfqdn(addr)
+        for a in socket.getaddrinfo(host, 0, family, socket.SOCK_STREAM):
+            try:
+                return a[4][0]
+            except Exception:
+                pass
+        return addr
+
+
+class SpeculativeExecutionPolicy(object):
+    """
+    Interface for specifying speculative execution plans
+    """
+
+    def new_plan(self, keyspace, statement):
+        """
+        Returns
+
+        :param keyspace:
+        :param statement:
+        :return:
+        """
+        raise NotImplementedError()
+
+
+class SpeculativeExecutionPlan(object):
+    def next_execution(self, host):
+        raise NotImplementedError()
+
+
+class NoSpeculativeExecutionPlan(SpeculativeExecutionPlan):
+    def next_execution(self, host):
+        return -1
+
+
+class NoSpeculativeExecutionPolicy(SpeculativeExecutionPolicy):
+
+    def new_plan(self, keyspace, statement):
+        return NoSpeculativeExecutionPlan()
+
+
+class ConstantSpeculativeExecutionPolicy(SpeculativeExecutionPolicy):
+    """
+    A speculative execution policy that sends a new query every X seconds (**delay**) for a maximum of Y attempts (**max_attempts**).
+    """
+
+    def __init__(self, delay, max_attempts):
+        self.delay = delay
+        self.max_attempts = max_attempts
+
+    class ConstantSpeculativeExecutionPlan(SpeculativeExecutionPlan):
+        def __init__(self, delay, max_attempts):
+            self.delay = delay
+            self.remaining = max_attempts
+
+        def next_execution(self, host):
+            if self.remaining > 0:
+                self.remaining -= 1
+                return self.delay
+            else:
+                return -1
+
+    def new_plan(self, keyspace, statement):
+        return self.ConstantSpeculativeExecutionPlan(self.delay, self.max_attempts)

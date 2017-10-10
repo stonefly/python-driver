@@ -1,4 +1,4 @@
-# Copyright 2013-2015 DataStax, Inc.
+# Copyright 2013-2017 DataStax, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,25 +17,27 @@ except ImportError:
     import unittest # noqa
 
 import errno
+import math
+from mock import patch, Mock
 import os
-import sys
-
+import weakref
 import six
 from six import BytesIO
-
 from socket import error as socket_error
 
-from mock import patch, Mock
-
 from cassandra.connection import (HEADER_DIRECTION_TO_CLIENT,
-                                  ConnectionException)
+                                  ConnectionException, ProtocolError)
 
 from cassandra.protocol import (write_stringmultimap, write_int, write_string,
                                 SupportedMessage, ReadyMessage, ServerError)
 from cassandra.marshal import uint8_pack, uint32_pack, int32_pack
 
+from tests import is_monkey_patched
+
+
 try:
-    from cassandra.io.libevreactor import LibevConnection
+    from cassandra.io.libevreactor import _cleanup as libev__cleanup
+    from cassandra.io.libevreactor import LibevConnection, LibevLoop
 except ImportError:
     LibevConnection = None  # noqa
 
@@ -48,8 +50,8 @@ except ImportError:
 class LibevConnectionTest(unittest.TestCase):
 
     def setUp(self):
-        if 'gevent.monkey' in sys.modules:
-            raise unittest.SkipTest("gevent monkey-patching detected")
+        if is_monkey_patched():
+            raise unittest.SkipTest("Can't test libev with monkey patching")
         if LibevConnection is None:
             raise unittest.SkipTest('libev does not appear to be installed correctly')
         LibevConnection.initialize_reactor()
@@ -128,7 +130,7 @@ class LibevConnectionTest(unittest.TestCase):
 
         c._socket.recv.side_effect = side_effect
         c.handle_read(None, 0)
-        self.assertEqual(c._total_reqd_bytes, 20000 + len(header))
+        self.assertEqual(c._current_frame.end_pos, 20000 + len(header))
         # the EAGAIN prevents it from reading the last 100 bytes
         c._iobuf.seek(0, os.SEEK_END)
         pos = c._iobuf.tell()
@@ -155,7 +157,7 @@ class LibevConnectionTest(unittest.TestCase):
         # make sure it errored correctly
         self.assertTrue(c.is_defunct)
         self.assertTrue(c.connected_event.is_set())
-        self.assertIsInstance(c.last_error, ConnectionException)
+        self.assertIsInstance(c.last_error, ProtocolError)
 
     def test_error_message_on_startup(self, *args):
         c = self.make_connection()
@@ -213,13 +215,18 @@ class LibevConnectionTest(unittest.TestCase):
         c = self.make_connection()
 
         # only write the first four bytes of the OptionsMessage
+        write_size = 4
         c._socket.send.side_effect = None
-        c._socket.send.return_value = 4
+        c._socket.send.return_value = write_size
         c.handle_write(None, 0)
 
+        msg_size = 9  # v3+ frame header
+        expected_writes = int(math.ceil(float(msg_size) / write_size))
+        size_mod = msg_size % write_size
+        last_write_size = size_mod if size_mod else write_size
         self.assertFalse(c.is_defunct)
-        self.assertEqual(2, c._socket.send.call_count)
-        self.assertEqual(4, len(c._socket.send.call_args[0][0]))
+        self.assertEqual(expected_writes, c._socket.send.call_count)
+        self.assertEqual(last_write_size, len(c._socket.send.call_args[0][0]))
 
     def test_socket_error_on_read(self, *args):
         c = self.make_connection()
@@ -288,3 +295,37 @@ class LibevConnectionTest(unittest.TestCase):
 
         self.assertTrue(c.connected_event.is_set())
         self.assertFalse(c.is_defunct)
+
+    def test_watchers_are_finished(self, *args):
+        """
+        Test for asserting that watchers are closed in LibevConnection
+
+        This test simulates a process termination without calling cluster.shutdown(), which would trigger
+        LibevConnection._libevloop._cleanup. It will check the watchers have been closed
+        Finally it will restore the LibevConnection reactor so it doesn't affect
+        the rest of the tests
+
+        @since 3.10
+        @jira_ticket PYTHON-747
+        @expected_result the watchers are closed
+
+        @test_category connection
+        """
+        with patch.object(LibevConnection._libevloop, "_thread"), \
+             patch.object(LibevConnection._libevloop, "notify"):
+
+            self.make_connection()
+
+            # We have to make a copy because the connections shouldn't
+            # be alive when we verify them
+            live_connections = set(LibevConnection._libevloop._live_conns)
+
+            # This simulates the process ending without cluster.shutdown()
+            # being called, then with atexit _cleanup for libevreactor would
+            # be called
+            libev__cleanup(weakref.ref(LibevConnection._libevloop))
+            for conn in live_connections:
+                for watcher in (conn._write_watcher, conn._read_watcher):
+                    self.assertTrue(watcher.stop.mock_calls)
+
+        LibevConnection._libevloop._shutdown = False

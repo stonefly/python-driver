@@ -1,4 +1,4 @@
-# Copyright 2015 DataStax, Inc.
+# Copyright 2013-2017 DataStax, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,14 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+try:
+    import unittest2 as unittest
+except ImportError:
+    import unittest  # noqa
 
-from unittest import TestCase
 import six
 from cassandra.cqlengine.operators import EqualsOperator
 from cassandra.cqlengine.statements import StatementException, WhereClause
 
 
-class TestWhereClause(TestCase):
+class TestWhereClause(unittest.TestCase):
 
     def test_operator_check(self):
         """ tests that creating a where statement with a non BaseWhereOperator object fails """

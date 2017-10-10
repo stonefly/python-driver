@@ -1,4 +1,4 @@
-# Copyright 2013-2015 DataStax, Inc.
+# Copyright 2013-2017 DataStax, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,14 +17,15 @@ from functools import partial
 import logging
 import os
 import socket
-from threading import Event, Lock, Thread
+import ssl
+from threading import Lock, Thread
+import time
 import weakref
 
-from six.moves import xrange
+from six.moves import range
 
-from cassandra import OperationTimedOut
-from cassandra.connection import Connection, ConnectionShutdown, NONBLOCKING
-from cassandra.protocol import RegisterMessage
+from cassandra.connection import (Connection, ConnectionShutdown,
+                                  NONBLOCKING, Timer, TimerManager)
 try:
     import cassandra.io.libevwrapper as libev
 except ImportError:
@@ -37,11 +38,6 @@ except ImportError:
         "the C extension.")
 
 
-try:
-    import ssl
-except ImportError:
-    ssl = None # NOQA
-
 log = logging.getLogger(__name__)
 
 
@@ -50,7 +46,6 @@ def _cleanup(loop_weakref):
         loop = loop_weakref()
     except ReferenceError:
         return
-
     loop._cleanup()
 
 
@@ -68,6 +63,7 @@ class LibevLoop(object):
         self._started = False
         self._shutdown = False
         self._lock = Lock()
+        self._lock_thread = Lock()
 
         self._thread = None
 
@@ -85,10 +81,10 @@ class LibevLoop(object):
         self._loop.unref()
         self._preparer.start()
 
-        atexit.register(partial(_cleanup, weakref.ref(self)))
+        self._timers = TimerManager()
+        self._loop_timer = libev.Timer(self._loop, self._on_loop_timer)
 
-    def notify(self):
-        self._notifier.send()
+        atexit.register(partial(_cleanup, weakref.ref(self)))
 
     def maybe_start(self):
         should_start = False
@@ -99,18 +95,20 @@ class LibevLoop(object):
                 should_start = True
 
         if should_start:
-            self._thread = Thread(target=self._run_loop, name="event_loop")
-            self._thread.daemon = True
-            self._thread.start()
+            with self._lock_thread:
+                if not self._shutdown:
+                    self._thread = Thread(target=self._run_loop, name="event_loop")
+                    self._thread.daemon = True
+                    self._thread.start()
 
         self._notifier.send()
 
     def _run_loop(self):
         while True:
-            end_condition = self._loop.start()
+            self._loop.start()
             # there are still active watchers, no deadlock
             with self._lock:
-                if not self._shutdown and (end_condition or self._live_conns):
+                if not self._shutdown and self._live_conns:
                     log.debug("Restarting event loop")
                     continue
                 else:
@@ -126,22 +124,40 @@ class LibevLoop(object):
 
         for conn in self._live_conns | self._new_conns | self._closed_conns:
             conn.close()
-            if conn._write_watcher:
-                conn._write_watcher.stop()
-                del conn._write_watcher
-            if conn._read_watcher:
-                conn._read_watcher.stop()
-                del conn._read_watcher
+            for watcher in (conn._write_watcher, conn._read_watcher):
+                if watcher:
+                    watcher.stop()
 
-        log.debug("Waiting for event loop thread to join...")
-        self._thread.join(timeout=1.0)
+        self.notify()  # wake the timer watcher
+
+        # PYTHON-752 Thread might have just been created and not started
+        with self._lock_thread:
+            self._thread.join(timeout=1.0)
+
         if self._thread.is_alive():
             log.warning(
                 "Event loop thread could not be joined, so shutdown may not be clean. "
                 "Please call Cluster.shutdown() to avoid this.")
 
         log.debug("Event loop thread was joined")
-        self._loop = None
+
+    def add_timer(self, timer):
+        self._timers.add_timer(timer)
+        self._notifier.send()  # wake up in case this timer is earlier
+
+    def _update_timer(self):
+        if not self._shutdown:
+            next_end = self._timers.service_timeouts()
+            if next_end:
+                self._loop_timer.start(next_end - time.time())  # timer handles negative values
+        else:
+            self._loop_timer.stop()
+
+    def _on_loop_timer(self):
+        self._timers.service_timeouts()
+
+    def notify(self):
+        self._notifier.send()
 
     def connection_created(self, conn):
         with self._conn_set_lock:
@@ -205,6 +221,9 @@ class LibevLoop(object):
 
             changed = True
 
+        # TODO: update to do connection management, timer updates through dedicated async 'notifier' callbacks
+        self._update_timer()
+
         if changed:
             self._notifier.send()
 
@@ -215,7 +234,6 @@ class LibevConnection(Connection):
     """
     _libevloop = None
     _write_watcher_is_active = False
-    _total_reqd_bytes = 0
     _read_watcher = None
     _write_watcher = None
     _socket = None
@@ -236,38 +254,19 @@ class LibevConnection(Connection):
             cls._libevloop._cleanup()
             cls._libevloop = None
 
+    @classmethod
+    def create_timer(cls, timeout, callback):
+        timer = Timer(timeout, callback)
+        cls._libevloop.add_timer(timer)
+        return timer
+
     def __init__(self, *args, **kwargs):
         Connection.__init__(self, *args, **kwargs)
 
-        self.connected_event = Event()
-
-        self._callbacks = {}
         self.deque = deque()
         self._deque_lock = Lock()
-
-        sockerr = None
-        addresses = socket.getaddrinfo(self.host, self.port, socket.AF_UNSPEC, socket.SOCK_STREAM)
-        for (af, socktype, proto, canonname, sockaddr) in addresses:
-            try:
-                self._socket = socket.socket(af, socktype, proto)
-                if self.ssl_options:
-                    if not ssl:
-                        raise Exception("This version of Python was not compiled with SSL support")
-                    self._socket = ssl.wrap_socket(self._socket, **self.ssl_options)
-                self._socket.settimeout(1.0)  # TODO potentially make this value configurable
-                self._socket.connect(sockaddr)
-                sockerr = None
-                break
-            except socket.error as err:
-                sockerr = err
-        if sockerr:
-            raise socket.error(sockerr.errno, "Tried connecting to %s. Last error: %s" % ([a[4] for a in addresses], sockerr.strerror))
-
+        self._connect_socket()
         self._socket.setblocking(0)
-
-        if self.sockopts:
-            for args in self.sockopts:
-                self._socket.setsockopt(*args)
 
         with self._libevloop._lock:
             self._read_watcher = libev.IO(self._socket.fileno(), libev.EV_READ, self._libevloop._loop, self.handle_read)
@@ -293,7 +292,7 @@ class LibevConnection(Connection):
 
         # don't leave in-progress operations hanging
         if not self.is_defunct:
-            self.error_all_callbacks(
+            self.error_all_requests(
                 ConnectionShutdown("Connection to %s was closed" % self.host))
 
     def handle_write(self, watcher, revents, errno=None):
@@ -361,7 +360,7 @@ class LibevConnection(Connection):
         sabs = self.out_buffer_size
         if len(data) > sabs:
             chunks = []
-            for i in xrange(0, len(data), sabs):
+            for i in range(0, len(data), sabs):
                 chunks.append(data[i:i + sabs])
         else:
             chunks = [data]
@@ -369,14 +368,3 @@ class LibevConnection(Connection):
         with self._deque_lock:
             self.deque.extend(chunks)
             self._libevloop.notify()
-
-    def register_watcher(self, event_type, callback, register_timeout=None):
-        self._push_watchers[event_type].add(callback)
-        self.wait_for_response(
-            RegisterMessage(event_list=[event_type]), timeout=register_timeout)
-
-    def register_watchers(self, type_callback_dict, register_timeout=None):
-        for event_type, callback in type_callback_dict.items():
-            self._push_watchers[event_type].add(callback)
-        self.wait_for_response(
-            RegisterMessage(event_list=type_callback_dict.keys()), timeout=register_timeout)

@@ -1,4 +1,4 @@
-# Copyright 2015 DataStax, Inc.
+# Copyright 2013-2017 DataStax, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,14 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest import TestCase
-from cassandra.cqlengine.statements import AssignmentStatement, StatementException
+from tests.unit.cython.utils import cyimport, cythontest
+types_testhelper = cyimport('tests.unit.cython.types_testhelper')
+
+try:
+    import unittest2 as unittest
+except ImportError:
+    import unittest  # noqa
 
 
-class AssignmentStatementTest(TestCase):
+class TypesTest(unittest.TestCase):
 
-    def test_add_assignment_type_checking(self):
-        """ tests that only assignment clauses can be added to queries """
-        stmt = AssignmentStatement('table', [])
-        with self.assertRaises(StatementException):
-            stmt.add_assignment_clause('x=5')
+    @cythontest
+    def test_datetype(self):
+        types_testhelper.test_datetype(self.assertEqual)
+
+    @cythontest
+    def test_date_side_by_side(self):
+        types_testhelper.test_date_side_by_side(self.assertEqual)
